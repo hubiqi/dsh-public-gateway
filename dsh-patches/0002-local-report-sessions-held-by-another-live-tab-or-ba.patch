@@ -1,0 +1,183 @@
+From 49daea389485a86a1201180f7d9b4ca556a46f09 Mon Sep 17 00:00:00 2001
+From: dsh-public-gateway <noreply@example.com>
+Date: Thu, 10 Sep 2026 18:06:23 +0000
+Subject: [PATCH 1/2] local: report sessions held by another live tab or
+ backend as session/in-use
+
+---
+ packages/api/session-controller/src/agent.ts  | 13 +++++++-
+ packages/api/session-controller/src/types.ts  |  1 +
+ .../tests/agent.host.spec.ts                  | 12 +++++++
+ .../src/client/ModelSelect.tsx                |  5 ++-
+ .../ui-model-selection/src/client/locales.ts  |  2 ++
+ .../tests/model-select.client.spec.tsx        | 31 +++++++++++++++++++
+ .../extensions/tool-cordis/src/api-catalog.ts |  2 +-
+ 7 files changed, 63 insertions(+), 3 deletions(-)
+
+diff --git a/packages/api/session-controller/src/agent.ts b/packages/api/session-controller/src/agent.ts
+index dd41090c22..8dd950ecda 100644
+--- a/packages/api/session-controller/src/agent.ts
++++ b/packages/api/session-controller/src/agent.ts
+@@ -58,7 +58,7 @@ export class ApiSessionPresetConflict extends Error {
+ }
+ 
+ /** Failures produced while resolving one ordinary Session identity to its live Agent. */
+-export type ApiSessionAgentError = RemoteError<'session/not-found' | 'session/agent-busy' | 'gateway/internal'>
++export type ApiSessionAgentError = RemoteError<'session/not-found' | 'session/agent-busy' | 'session/in-use' | 'gateway/internal'>
+ 
+ /** Result of resolving one ordinary Session identity to its live Agent. */
+ export type ApiSessionAgentResult =
+@@ -205,6 +205,17 @@ export class ApiSessionAgentController {
+       if (error instanceof ApiSessionSubagentOwnership) {
+         return { error: apiSessionSubagentOwnershipError(error.sessionId) }
+       }
++      // Narrowed by name: this package is excluded from host-dependency
++      // scanning, so a value import of the lease error trips the gate.
++      if (error instanceof Error && error.name === 'SessionAlreadyOwnedError') {
++        return {
++          error: new RemoteError(
++            'session/in-use',
++            `session "${sessionId}" is held by another live tab or backend; close it there and retry`,
++            { sessionId },
++          ),
++        }
++      }
+       const raced = this.liveAgent(sessionId)
+       if (raced !== undefined) return raced
+       const racedSession = this.ctx.sessions.get(sessionId)
+diff --git a/packages/api/session-controller/src/types.ts b/packages/api/session-controller/src/types.ts
+index 60f7a93e56..b25ac9e3b7 100644
+--- a/packages/api/session-controller/src/types.ts
++++ b/packages/api/session-controller/src/types.ts
+@@ -192,6 +192,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
+       readonly existingCwd?: string
+     }
+     'session/agent-busy': { readonly reason: string }
++    'session/in-use': { readonly sessionId: SessionId }
+     'session/invalid-time-zone': { readonly value: string }
+     'session/workspace-attach-failed': { readonly sessionId: SessionId; readonly workspaceId: string }
+     'agent-preset/conflict': {
+diff --git a/packages/api/session-controller/tests/agent.host.spec.ts b/packages/api/session-controller/tests/agent.host.spec.ts
+index 586d7b4e7b..23496fab8d 100644
+--- a/packages/api/session-controller/tests/agent.host.spec.ts
++++ b/packages/api/session-controller/tests/agent.host.spec.ts
+@@ -18,6 +18,7 @@ import {
+   inspectApiSession,
+ } from '../src/agent.ts'
+ import { installModelSelectionProjection } from '../src/model-selection-projection.ts'
++import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
+ import { installSessionReadTestServices, testSessionPersistence } from './test-remote.ts'
+ 
+ const roots: Context[] = []
+@@ -235,6 +236,17 @@ describe('ApiSession Agent lookup and recovery', () => {
+     await expect(failed.agents.resolveAgent(meta.id)).resolves.toMatchObject({
+       error: { code: 'gateway/internal', message: expect.stringContaining('factory unavailable') as string },
+     })
++
++    const contended = await harness()
++    const held = header('held')
++    providePersistence(contended.ctx, {
++      list: () => Promise.resolve([held]),
++      inspect: () => Promise.resolve({ meta: held, events: [] }),
++    })
++    vi.spyOn(contended.ctx.agents, 'resume').mockRejectedValue(new SessionAlreadyOwnedError(held.id))
++    await expect(contended.agents.resolveAgent(held.id)).resolves.toMatchObject({
++      error: { code: 'session/in-use', message: expect.stringContaining('another live tab or backend') as string },
++    })
+   })
+ 
+   it('requires projected observations before activation', async () => {
+diff --git a/packages/client/ui-model-selection/src/client/ModelSelect.tsx b/packages/client/ui-model-selection/src/client/ModelSelect.tsx
+index e9fc0195ef..cf451e5904 100644
+--- a/packages/client/ui-model-selection/src/client/ModelSelect.tsx
++++ b/packages/client/ui-model-selection/src/client/ModelSelect.tsx
+@@ -210,7 +210,10 @@ export function ModelSelect(
+     const message = directory.getSnapshot().error
+     if (message !== null) {
+       toastSeq.current += 1
+-      setToast({ seq: toastSeq.current, text: t('error.action', { message }) })
++      const text = message.startsWith('session/in-use:')
++        ? t('error.inUse')
++        : t('error.action', { message })
++      setToast({ seq: toastSeq.current, text })
+     }
+   }
+ 
+diff --git a/packages/client/ui-model-selection/src/client/locales.ts b/packages/client/ui-model-selection/src/client/locales.ts
+index bf4b1ff922..88ff66142b 100644
+--- a/packages/client/ui-model-selection/src/client/locales.ts
++++ b/packages/client/ui-model-selection/src/client/locales.ts
+@@ -25,6 +25,7 @@ export const zh = {
+   'effort.providerDefault': 'Default',
+   'status.loading': '正在刷新模型列表…',
+   'error.action': '模型操作失败：{message}',
++  'error.inUse': '该会话正在另一个标签页或版本（完整版/初始版）中打开，请在那边操作，或关闭那边后重试',
+   'action.reload': '重新加载',
+   'warning.groupLoad': '{name} 加载失败：{message}',
+   'empty.models': '没有可用的模型。',
+@@ -52,6 +53,7 @@ export const en = {
+   'effort.providerDefault': 'Default',
+   'status.loading': 'Refreshing model list…',
+   'error.action': 'Model operation failed: {message}',
++  'error.inUse': 'This session is open in another tab or version (full/vanilla); act there, or close it there and retry',
+   'action.reload': 'Reload',
+   'warning.groupLoad': '{name} failed to load: {message}',
+   'empty.models': 'No models available.',
+diff --git a/packages/client/ui-model-selection/tests/model-select.client.spec.tsx b/packages/client/ui-model-selection/tests/model-select.client.spec.tsx
+index 3b8c92d8bf..b9ef607e18 100644
+--- a/packages/client/ui-model-selection/tests/model-select.client.spec.tsx
++++ b/packages/client/ui-model-selection/tests/model-select.client.spec.tsx
+@@ -200,6 +200,37 @@ describe('ModelSelect reasoning effort', () => {
+     expect(screen.queryByRole('button', { name: '重试' })).toBeNull()
+   })
+ 
++  it('maps a session/in-use selection failure to the localized in-use toast', async () => {
++    const groups = [{
++      id: 'deepseek-official',
++      name: 'DeepSeek',
++      models: [
++        { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', reasoning },
++        { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
++      ],
++    }]
++    const directory = createSnapshotStore<ModelDirectoryState>(state({ groups }))
++    const select = vi.fn(async () => {
++      directory.set(state({ groups, status: 'error', error: 'session/in-use: session "s" is held by another live tab or backend' }))
++      return false
++    })
++    render(<ModelSelect
++      locked={false}
++      available
++      directory={directory}
++      load={vi.fn()}
++      select={select}
++      t={t}
++    />)
++
++    fireEvent.click(screen.getByRole('button', { name: /选择模型|当前/ }))
++    fireEvent.click(screen.getByRole('menuitem', { name: /模型/ }))
++    fireEvent.click(screen.getByRole('menuitemradio', { name: /DeepSeek-V4-Pro/ }))
++    const toast = await screen.findByRole('alert')
++    expect(toast.textContent).toContain('该会话正在另一个标签页或版本')
++    expect(toast.textContent).not.toContain('session/in-use')
++  })
++
+   it('portals the placed menu card to body and closes only on truly-outside mousedown', () => {
+     const offsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth')!
+     const offsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight')!
+diff --git a/packages/extensions/tool-cordis/src/api-catalog.ts b/packages/extensions/tool-cordis/src/api-catalog.ts
+index 1fb4643b80..8cc5b95747 100644
+--- a/packages/extensions/tool-cordis/src/api-catalog.ts
++++ b/packages/extensions/tool-cordis/src/api-catalog.ts
+@@ -3644,7 +3644,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
+   },
+   {
+     name: 'ApiSessionAgentError',
+-    declaration: 'export type ApiSessionAgentError = RemoteError<\'session/not-found\' | \'session/agent-busy\' | \'gateway/internal\'>;',
++    declaration: 'export type ApiSessionAgentError = RemoteError<\'session/not-found\' | \'session/agent-busy\' | \'session/in-use\' | \'gateway/internal\'>;',
+   },
+   {
+     name: 'ApiSessionAgentResult',
+-- 
+2.43.7
+

@@ -12,17 +12,22 @@ English summary below.
     完整版/原版双后端切换、WS 透传（断线自愈、stale cookie 自动换新）、
     120s 读取超时、UA 日志。gzip 响应的 `accept-encoding` 会剥离，
     保证 ownsHost 注入不丢失（否则远端浏览器设置页不可用）。
+    切换页可勾选“同时释放另一端占用”（重启另一端后端放会话锁，
+    用前确认那边没有正在跑的任务）。
   - `gateway.conf.example` 配置模板；`install.sh` 一键安装/升级/卸载；
     `dsh-public-gateway.service` 与后端解耦的 systemd user 单元
     （dsh 更新重启不影响网关）；`README.md` / `PROTECT.md` 模块文档。
 - `backends/` 两个后端的重建材料：`web-vanilla-profile/`（仅官方 bundle 的
   兜底 profile，直拷进 `$DSH_HOME/profiles/`）、`dsh-web.service.example` /
   `dsh-web-vanilla.service.example`（trusted-host 与持久化日志是网关工作的前提）。
-- `dsh-patches/` dsh 侧补丁（公网旧设备访问逼出来的修复）：
+- `dsh-patches/` dsh 侧补丁（公网使用逼出来的修复）：
   - `0001-*` 旧浏览器兼容：`Promise.withResolvers` / `AbortSignal.any` 垫片、
     host 注入启动尾内联 ponyfill、PDF 预览切 legacy 构建、
     settings 启动修复。没有它，Chrome 111 及更早浏览器会永久重连、
     模型页报 `settings are unavailable in this browser`、PDF 预览白屏。
+  - `0002-*` 双后端同会话撞锁报 `session/in-use`（中文 toast 明示去占用端
+    继续或重启另一端），替代晦涩的 `gateway/internal`；`0003-*` 修正其文案
+    （关标签页不释放服务端锁）。
   - `git-hooks/` dsh 更新后自动重建前端产物并重启后端的 hook，
     保证 `git pull` 不打断公网服务。
 

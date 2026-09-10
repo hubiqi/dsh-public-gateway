@@ -1,0 +1,26 @@
+From 930bf206cc973868193c57182aa63190d47793e3 Mon Sep 17 00:00:00 2001
+From: dsh-public-gateway <noreply@example.com>
+Date: Thu, 10 Sep 2026 18:24:41 +0000
+Subject: [PATCH 2/2] local: correct the session/in-use toast, closing a tab
+ does not release the lock
+
+---
+ packages/client/ui-model-selection/src/client/locales.ts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/packages/client/ui-model-selection/src/client/locales.ts b/packages/client/ui-model-selection/src/client/locales.ts
+index 88ff66142b..5b8f1ff4cf 100644
+--- a/packages/client/ui-model-selection/src/client/locales.ts
++++ b/packages/client/ui-model-selection/src/client/locales.ts
+@@ -25,7 +25,7 @@ export const zh = {
+   'effort.providerDefault': 'Default',
+   'status.loading': '正在刷新模型列表…',
+   'error.action': '模型操作失败：{message}',
+-  'error.inUse': '该会话正在另一个标签页或版本（完整版/初始版）中打开，请在那边操作，或关闭那边后重试',
++  'error.inUse': '该会话正在另一个标签页或版本（完整版/初始版）中打开，请在那边继续操作；如需换边使用，先重启另一端后端再试',
+   'action.reload': '重新加载',
+   'warning.groupLoad': '{name} 加载失败：{message}',
+   'empty.models': '没有可用的模型。',
+-- 
+2.43.7
+

@@ -39,6 +39,7 @@ import secrets
 import select
 import socket
 import socketserver
+import subprocess
 import sys
 import threading
 import time
@@ -382,6 +383,33 @@ BACKENDS = {
 BACKENDS_BY_PORT = dict(
     [(DSH_PORT, BACKENDS[MODE_FULL]), (VANILLA_PORT, BACKENDS[MODE_VANILLA])])
 
+# 切换模式时“释放另一端占用”所重启的 systemd user 单元：重启即释放该后端
+# 持有的全部会话写锁（会话数据不丢，下次访问自动 resume）；仅在用户显式勾选
+# 时执行，执行前请确认另一端没有正在跑的任务。
+RELEASE_UNITS = {
+    MODE_FULL: "dsh-web.service",
+    MODE_VANILLA: "dsh-web-vanilla.service",
+}
+
+
+def release_other_backend(want_mode):
+    """重启非目标端的后端以释放其会话占用；返回 (ok, message)。"""
+    other = MODE_VANILLA if want_mode == MODE_FULL else MODE_FULL
+    unit = RELEASE_UNITS[other]
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "restart", unit],
+            timeout=60, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except Exception as exc:
+        log("release %s failed: %s" % (unit, exc))
+        return False, "释放另一端失败（执行出错），未切换。"
+    if proc.returncode != 0:
+        out = (proc.stdout or b"").decode("utf-8", "replace").strip()[:200]
+        log("release %s failed rc=%s: %s" % (unit, proc.returncode, out))
+        return False, "释放另一端失败（%s），未切换。" % (out or unit)
+    log("release %s ok (mode switch)" % unit)
+    return True, ""
+
 # --------------------------------------------------------------------------- #
 # IP 锁定
 # --------------------------------------------------------------------------- #
@@ -482,6 +510,11 @@ def login_page(error=None, mode=MODE_FULL, authed_user=None):
             "<span><b>\u521d\u59cb\u7248\uff08\u4ec5\u5b98\u65b9\u81ea\u5e26\u63d2\u4ef6\uff09</b>"
             "<span>\u63d2\u4ef6\u628a\u5b8c\u6574\u7248\u5f04\u574f\u65f6\u52fe\u9009\u6b64\u9879\u6062\u590d\u8bbf\u95ee</span>"
             "</span></label></div>"
+            "<div class=\"vanilla\"><label><input type=\"checkbox\" name=\"release\" value=\"on\">"
+            "<span><b>\u540c\u65f6\u91ca\u653e\u53e6\u4e00\u7aef\u5360\u7528</b>"
+            "<span>\u91cd\u542f\u53e6\u4e00\u7aef\u540e\u7aef\u4ee5\u91ca\u653e\u5176\u4f1a\u8bdd\u9501"
+            "\uff1b\u8bf7\u786e\u8ba4\u90a3\u8fb9\u6ca1\u6709\u6b63\u5728\u8dd1\u7684\u4efb\u52a1</span>"
+            "</span></label></div>"
             "<div class=\"row\"><button type=\"submit\" name=\"action\" value=\"switch\">"
             "\u4fdd\u5b58\u5e76\u8fdb\u5165</button>"
             "<button class=\"ghost\" type=\"submit\" name=\"action\" value=\"logout\">"
@@ -502,6 +535,11 @@ def login_page(error=None, mode=MODE_FULL, authed_user=None):
             "<span><b>\u521d\u59cb\u7248\uff08\u4ec5\u5b98\u65b9\u81ea\u5e26\u63d2\u4ef6\uff09</b>"
             "<span>\u9ed8\u8ba4\u5173\u95ed\uff1b\u63d2\u4ef6\u628a\u5b8c\u6574\u7248\u5f04\u574f\u65f6"
             "\u52fe\u9009\u6b64\u9879\u4fdd\u8bc1\u80fd\u6b63\u5e38\u8fd0\u884c</span>"
+            "</span></label></div>"
+            "<div class=\"vanilla\"><label><input type=\"checkbox\" name=\"release\" value=\"on\">"
+            "<span><b>\u540c\u65f6\u91ca\u653e\u53e6\u4e00\u7aef\u5360\u7528</b>"
+            "<span>\u91cd\u542f\u53e6\u4e00\u7aef\u540e\u7aef\u4ee5\u91ca\u653e\u5176\u4f1a\u8bdd\u9501"
+            "\uff1b\u8bf7\u786e\u8ba4\u90a3\u8fb9\u6ca1\u6709\u6b63\u5728\u8dd1\u7684\u4efb\u52a1</span>"
             "</span></label></div>"
             "<button type=\"submit\" name=\"action\" value=\"login\">\u767b\u5f55</button>"
             "</form>%s" % (err, status))
@@ -703,6 +741,12 @@ class Handler(BaseHTTPRequestHandler):
                 record_success(ip)
                 self.send_redirect("/__login", [clear_session_cookie_header()])
                 return True
+            if form.get("release") == "on":
+                ok, message = release_other_backend(want_mode)
+                if not ok:
+                    self.send_html(200, login_page(error=message, mode=want_mode,
+                                                   authed_user=user))
+                    return True
             cookie = session_cookie_header(mint_session(user, want_mode),
                                            SESSION_MAX_AGE_SEC)
             self.send_redirect(_safe_next(query), [cookie])
@@ -715,6 +759,11 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if form.get("user") == USERNAME and form.get("pass") == PASSWORD:
             record_success(ip)
+            if form.get("release") == "on":
+                ok, message = release_other_backend(want_mode)
+                if not ok:
+                    self.send_html(200, login_page(error=message))
+                    return True
             cookie = session_cookie_header(mint_session(USERNAME, want_mode),
                                            SESSION_MAX_AGE_SEC)
             log("ip=%s login ok mode=%s ua=%s" % (ip, want_mode, ua))
