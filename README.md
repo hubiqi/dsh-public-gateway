@@ -15,6 +15,9 @@ English summary below.
   - `gateway.conf.example` 配置模板；`install.sh` 一键安装/升级/卸载；
     `dsh-public-gateway.service` 与后端解耦的 systemd user 单元
     （dsh 更新重启不影响网关）；`README.md` / `PROTECT.md` 模块文档。
+- `backends/` 两个后端的重建材料：`web-vanilla-profile/`（仅官方 bundle 的
+  兜底 profile，直拷进 `$DSH_HOME/profiles/`）、`dsh-web.service.example` /
+  `dsh-web-vanilla.service.example`（trusted-host 与持久化日志是网关工作的前提）。
 - `dsh-patches/` dsh 侧补丁（公网旧设备访问逼出来的修复）：
   - `0001-*` 旧浏览器兼容：`Promise.withResolvers` / `AbortSignal.any` 垫片、
     host 注入启动尾内联 ponyfill、PDF 预览切 legacy 构建、
@@ -26,6 +29,14 @@ English summary below.
 ## 安装
 
 ```sh
+# 0. 两个后端（完整版 3080 + 原版 3081，网关双模式都要）
+cp -r backends/web-vanilla-profile $DSH_HOME/profiles/web-vanilla
+# 按 backends/dsh-web.service.example 与 dsh-web-vanilla.service.example 建好
+# 两个 systemd user 单元：把 <你的公网IP> 换成服务器公网 IP（trusted-host 必需，
+# 否则网关转发的请求会被后端拒绝），WorkingDirectory/PATH 换成你的实际路径，
+# 日志必须落在 /var/log/dsh（网关从中取 token，不要写 /tmp）。
+# vanilla profile 保持零插件：它是插件弄崩完整版时的兜底。
+
 # 1. 网关
 cd gateway && bash install.sh
 vi /home/opc/dsh-public-gateway/etc/gateway.env   # 改成自己的账号密码

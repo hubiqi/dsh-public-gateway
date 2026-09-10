@@ -1,0 +1,22 @@
+[Unit]
+Description=DeepSeek Harness Web (vanilla: shipped bundles only, no third-party plugins)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 改成你的 dsh checkout 路径（与 dsh-web.service 相同）
+WorkingDirectory=/path/to/deepseek-harness
+# 同 dsh-web.service.example 的 PATH 说明
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# web-vanilla profile 仅官方 bundle（见 ../web-vanilla-profile），无第三方插件；
+# 网关「初始版」开关反代到这里，是插件弄崩完整版时的兜底。
+ExecStart=corepack pnpm dsh --profile web-vanilla --port 3081 --no-open
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+StandardOutput=append:/var/log/dsh/dsh-web-vanilla.log
+StandardError=append:/var/log/dsh/dsh-web-vanilla.log
+
+[Install]
+WantedBy=default.target

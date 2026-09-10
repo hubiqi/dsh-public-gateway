@@ -4,12 +4,12 @@
 set -e
 KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET="${1:?用法: ./install-hooks.sh /path/to/deepseek-harness}"
-HOOKS="$TARGET/.git/hooks"
-
-if [ ! -d "$HOOKS" ]; then
-  echo "错误: $HOOKS 不存在，确认这是 dsh 的 git checkout" >&2
+if ! GIT_DIR="$(git -C "$TARGET" rev-parse --absolute-git-dir 2>/dev/null)"; then
+  echo "错误: $TARGET 不是 git 仓库" >&2
   exit 1
 fi
+HOOKS="$GIT_DIR/hooks"
+mkdir -p "$HOOKS"
 install -m 0755 "$KIT_DIR/dsh-post-update-build.sh" "$HOOKS/dsh-post-update-build.sh"
 printf '#!/bin/sh\nexec "%s/dsh-post-update-build.sh"\n' "$HOOKS" > "$HOOKS/post-merge"
 printf '#!/bin/sh\nexec "%s/dsh-post-update-build.sh" "$@"\n' "$HOOKS" > "$HOOKS/post-rewrite"

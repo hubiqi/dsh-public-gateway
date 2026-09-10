@@ -1,0 +1,5 @@
+# web-vanilla: 初始版 profile —— 仅官方 bundle (dsh-base + dsh-web-app)，
+# 无任何第三方插件。公网网关的「初始版」开关反代到本 profile (127.0.0.1:3081)。
+# 请勿向本 profile 安装插件 (dsh plugin --profile web-vanilla add ...)，
+# 保持为空即是它的全部作用：插件把完整版弄崩时的可访问兜底。
+[]

@@ -1,0 +1,23 @@
+[Unit]
+Description=DeepSeek Harness Web (full: all plugins)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 改成你的 dsh checkout 路径
+WorkingDirectory=/path/to/deepseek-harness
+# 改成你的 node/corepack 所在目录；nvm 用户示例:
+# Environment=PATH=/home/<你>/.nvm/versions/node/v24.21.0/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# 关键: --trusted-host 必须包含网关的公网地址，否则经网关的请求会被拒绝；
+# 日志必须落在持久化路径（网关从中提取访问 token），不要写 /tmp。
+ExecStart=corepack pnpm dsh web --port 3080 --trusted-host <你的公网IP>:9080 --trusted-host <你的公网IP> --no-open
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+StandardOutput=append:/var/log/dsh/dsh-web.log
+StandardError=append:/var/log/dsh/dsh-web.log
+
+[Install]
+WantedBy=default.target
