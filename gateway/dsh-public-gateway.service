@@ -1,0 +1,25 @@
+[Unit]
+Description=dsh Public Gateway (Basic Auth reverse proxy + WebSocket)
+Documentation=file:/home/opc/dsh-public-gateway/README.md
+# 与 dsh 后端完全解耦：只做启动顺序，不做生命周期绑定。
+# dsh 更新/重启时本服务保持运行，后端未就绪则回 503，恢复后自动可用。
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/opc/dsh-public-gateway
+# 密码等敏感项放这里；配置文件里可留空
+EnvironmentFile=-/home/opc/dsh-public-gateway/etc/gateway.env
+ExecStart=/usr/bin/python3 /home/opc/dsh-public-gateway/bin/gateway.py
+Restart=always
+RestartSec=3
+# 日志交给 journald + 同时落盘（见 install.sh 配置的 logrotate 或直接追加文件）
+StandardOutput=append:/home/opc/dsh-public-gateway/logs/gateway.log
+StandardError=append:/home/opc/dsh-public-gateway/logs/gateway.log
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

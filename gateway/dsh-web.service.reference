@@ -1,0 +1,16 @@
+[Unit]
+Description=DeepSeek Harness Web
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+WorkingDirectory=/home/opc/deepseek-harness
+Environment=PATH=/home/opc/.nvm/versions/node/v24.21.0/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/opc/.nvm/versions/node/v24.21.0/bin/corepack pnpm dsh web --port 3080 --trusted-host 158.178.244.142:9080 --trusted-host 158.178.244.142 --no-open
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+StandardOutput=append:/var/log/dsh/dsh-web.log
+StandardError=append:/var/log/dsh/dsh-web.log
+[Install]
+WantedBy=default.target

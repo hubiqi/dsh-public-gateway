@@ -1,0 +1,490 @@
+From 54996fb4ebec854d32389383afefe6465f41ab68 Mon Sep 17 00:00:00 2001
+From: dsh-public-gateway <noreply@example.com>
+Date: Thu, 10 Sep 2026 11:52:04 +0000
+Subject: [PATCH] local: keep public-gateway clients working on old browsers
+
+Browser floor for the household (Chrome 111, iOS < 18.4):
+- documentpreview bundles pdfjs-dist/legacy (Iterator/Promise.try gap)
+- apps/web compat shims Promise.withResolvers/AbortSignal.any pre-119
+- webserver boot tail builds its deferred inline (runs before shell)
+- settings/src adds settingsNamespace/installSettingsSection so the
+  installed @linxin666 entries no longer fail the plugin tree at boot
+  (pre-existing local fix, required for dsh-web to start; deduped the
+  namespace validator and fixed EOF whitespace for the staged gates)
+
+Local-only commit: preserves these across git pull merges. Agent Notes
+2026-09-10-pdfjs-legacy-build + 2026-09-10-pre-119-browser-support.
+---
+ .../2026-09-10-pdfjs-legacy-build.i18n.yaml   |  6 +++
+ .../bug-fix/2026-09-10-pdfjs-legacy-build.md  | 31 ++++++++++++
+ .../2026-09-10-pdfjs-legacy-build.zh.md       | 31 ++++++++++++
+ ...26-09-10-pre-119-browser-support.i18n.yaml |  6 +++
+ .../2026-09-10-pre-119-browser-support.md     | 26 ++++++++++
+ .../2026-09-10-pre-119-browser-support.zh.md  | 44 ++++++++++++++++
+ apps/web/src/compat.ts                        | 50 +++++++++++++++++++
+ apps/web/src/main.ts                          |  1 +
+ .../ui-sidebar-documentpreview/README.md      |  1 +
+ .../ui-sidebar-documentpreview/README.zh.md   |  1 +
+ .../src/client/pdf/asset-imports.d.ts         | 10 +++-
+ .../src/client/pdf/assets.ts                  |  2 +-
+ .../src/client/pdf/document.ts                |  2 +-
+ .../src/client/pdf/runtime.ts                 |  2 +-
+ .../tests/pdf-document.client.spec.ts         |  2 +-
+ .../tests/pdf-runtime.client.spec.ts          |  2 +-
+ .../tsdown.config.ts                          |  4 +-
+ packages/host/webserver/src/injections.ts     |  4 +-
+ .../host/webserver/tests/webserver.spec.ts    |  2 +-
+ packages/settings/settings/src/index.ts       | 34 +++++++++++++
+ 20 files changed, 251 insertions(+), 10 deletions(-)
+ create mode 100644 .agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.i18n.yaml
+ create mode 100644 .agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.md
+ create mode 100644 .agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.zh.md
+ create mode 100644 .agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.i18n.yaml
+ create mode 100644 .agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.md
+ create mode 100644 .agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.zh.md
+ create mode 100644 apps/web/src/compat.ts
+
+diff --git a/.agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.i18n.yaml b/.agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.i18n.yaml
+new file mode 100644
+index 0000000000..c1e52e8137
+--- /dev/null
++++ b/.agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.i18n.yaml
+@@ -0,0 +1,6 @@
++# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
++# side as of the last confirmed-consistent state. Both languages carry equal authority;
++# after editing either side, bring the other along and re-record with:
++#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.md
++2026-09-10-pdfjs-legacy-build.md: 32990810f1ab43be627419ba18471e18d0a11ab3
++2026-09-10-pdfjs-legacy-build.zh.md: fa2aefe7dc2b3ebd78aa37ef866c1bffb1493174
+diff --git a/.agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.md b/.agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.md
+new file mode 100644
+index 0000000000..32990810f1
+--- /dev/null
++++ b/.agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.md
+@@ -0,0 +1,31 @@
++# Agent Note: Document preview bundles the PDF.js legacy build for pre-ES2025 browsers
++
++Status: implemented
++
++English | [中文](2026-09-10-pdfjs-legacy-build.zh.md)
++
++## Problem
++
++Any fresh Web load after the document-preview plugin joined the roster failed on browsers without ES2025 `Iterator` helpers with `Failed to load plugins` / `failed to import loader entry ... (@deepseek-ai/dsh-client-ui-sidebar-documentpreview): Iterator is not defined`. The bundled `pdfjs-dist@6.3.289` modern build reads `Iterator.prototype` at import time and calls `Promise.try` from its worker bridge at runtime, both outside the repository's es2024 client target. One bad loader entry fails the whole plugin screen, so a phone on iOS < 18.4 or Chrome < 117 got a dead shell instead of a missing PDF tab. The failure looked vanilla-specific only because the reporter's full-mode tab predated the plugin's arrival and kept running its stale module graph; a fresh full-mode load failed identically.
++
++## Decision
++
++The preview now bundles `pdfjs-dist/legacy` (same 6.3.289 API, plus its maintained core-js polyfills) for both the main-thread runtime and the module worker: `runtime.ts` and the type-only imports reference `pdfjs-dist/legacy/build/pdf.min.mjs`, `assets.ts` and the `tsdown.config.ts` worker plugin reference `legacy/build/pdf.worker.min.mjs`, and `asset-imports.d.ts` re-exports the root entry's declarations for the minified legacy path (which ships no sibling types). The legacy main and worker builds were verified to import cleanly in a real Chromium with `globalThis.Iterator` deleted, and the legacy worker's core-js covers `Promise.try`, so old browsers get a working viewer rather than a failed shell.
++
++- **The real-library smoke already rendered through this build.** `pdf-smoke.client.spec.ts` imports `pdfjs-dist/legacy/build/pdf.mjs` with the legacy worker, so production now runs the exact module the smoke proves; the mock in `pdf-runtime.client.spec.ts` follows the new specifier.
++- **No hand-rolled platform polyfill.** A two-global `Iterator`/`Promise.try` shim was prototyped and verified, then removed in favor of the maintained build: the shim covered only the two APIs audited today, while the legacy build tracks every gap the dependency assumes.
++- **Bundle cost is ~110KB.** The minified legacy main and worker are each about 50–60KB larger than their modern twins on a ~7MB plugin artifact.
++
++## Alternatives considered
++
++**Keep the modern build and ship a compat module.** Rejected: it fixed the import and the audited runtime calls, but every future PDF.js minor could assume another ES2025 API and break old browsers again with the same dead shell. The maintained legacy build moves that tracking to upstream.
++
++**Pin PDF.js to a pre-Iterator major.** Rejected: the package's `BinaryDataFactory` asset plumbing and the `isEvalSupported`-era option comments target the v6 API, and a downgrade would trade a build-path change for an API migration with no offline way to verify the older line.
++
++**Tell affected users to update their browsers.** Rejected as the only answer: the failing class (system WebViews and iOS versions before 18.4) is exactly the phone audience the mobile layout work targets, and many of those browsers cannot be updated on demand.
++
++## Consequences
++
++- Fresh loads on pre-ES2025 browsers render the shell and open PDFs; verified in a real Chromium with the `Iterator` global removed, for both the full and the vanilla profile compositions.
++- `pdfjs-dist` stays pinned at 6.3.289; a future major bump re-audits the modern-vs-legacy choice against the client's build target.
++- The package README records the legacy choice under Known Limitations.
+diff --git a/.agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.zh.md b/.agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.zh.md
+new file mode 100644
+index 0000000000..fa2aefe7dc
+--- /dev/null
++++ b/.agents/notes/implemented/bug-fix/2026-09-10-pdfjs-legacy-build.zh.md
+@@ -0,0 +1,31 @@
++# Agent Note: 文档预览改用 PDF.js legacy 构建，兼容前 ES2025 浏览器
++
++Status: implemented
++
++[English](2026-09-10-pdfjs-legacy-build.md) | 中文
++
++## Problem
++
++文档预览插件进入 roster 之后，任何新加载的 Web 页面在没有 ES2025 `Iterator` 的浏览器上直接白屏：`Failed to load plugins` / `failed to import loader entry ... (@deepseek-ai/dsh-client-ui-sidebar-documentpreview): Iterator is not defined`。打包进来的 `pdfjs-dist@6.3.289` modern 构建在 import 时读 `Iterator.prototype`，运行时又在 worker 桥里调 `Promise.try`，两者都超出仓库 es2024 客户端构建目标。一个 loader entry 导入失败会导致整个插件屏失败，于是 iOS 18.4 之前或 Chrome 117 之前的手机得到的是死壳，而不是少一个 PDF 标签。报错看起来像初始版专属，只是因为上报者的完整版标签页停留在该插件加入之前的旧模块图上一直没关；完整版新加载同样会挂。
++
++## Decision
++
++预览的主线程运行时与模块 worker 一律改用 `pdfjs-dist/legacy`（同 6.3.289 API，另带其官方 core-js polyfill）：`runtime.ts` 与纯类型导入指向 `pdfjs-dist/legacy/build/pdf.min.mjs`，`assets.ts` 与 `tsdown.config.ts` 的 worker 插件指向 `legacy/build/pdf.worker.min.mjs`，`asset-imports.d.ts` 把根入口的类型声明转出口给没有附带类型的 minified legacy 路径（同版本同 API）。已在删掉 `globalThis.Iterator` 的真实 Chromium 里验证 legacy 主构建与 worker 构建都能干净导入；legacy worker 自带的 core-js 覆盖了 `Promise.try`，旧浏览器得到的是可用的查看器，而不是失败的壳。
++
++- **真库 smoke 本来就走的这个构建。** `pdf-smoke.client.spec.ts` 用的就是 `pdfjs-dist/legacy/build/pdf.mjs` 配 legacy worker，所以生产现在跑的正是 smoke 验证过的那个模块；`pdf-runtime.client.spec.ts` 里的 mock 跟随新路径。
++- **不要手写平台 polyfill。** 曾做出 `Iterator`/`Promise.try` 双全局补齐的原型并验证通过，又删掉了，改用官方构建：补齐只能覆盖今天审计到的两个 API，依赖以后每个小版本都可能再假设新的 ES2025 API，让旧浏览器带着同一个死壳再挂一次。跟踪这件事应该交给上游。
++- **包体积代价约 110KB。** minified legacy 主构建与 worker 构建各比 modern 双胞胎大约 50–60KB，在约 7MB 的插件产物上。
++
++## Alternatives considered
++
++**保留 modern 构建，附带一个兼容模块。** 否决：它能修导入和已审计的运行时调用，但以后 PDF.js 每个小版本都可能假设新的 ES2025 API，旧浏览器会带着同一个死壳再次挂掉。官方 legacy 构建把这份跟踪交给了上游。
++
++**把 PDF.js 钉到前 Iterator 大版本。** 否决：包内的 `BinaryDataFactory` 资源装配和选项注释都是按 v6 API 写的，降级等于用一次 API 迁移换一次构建路径修改，且离线无法验证旧版本线。
++
++**只告诉受影响用户升级浏览器。** 否决（不能作为唯一答案）：挂掉的正是移动端适配要覆盖的人群（系统 WebView 与 18.4 之前的 iOS），其中很多浏览器不能按需升级。
++
++## Consequences
++
++- 前 ES2025 浏览器新加载能渲染出壳，也能打开 PDF；在删掉 `Iterator` 全局的真实 Chromium 里对完整版与初始版两种组合都验证过。
++- `pdfjs-dist` 保持钉在 6.3.289；以后升大版本时，对照客户端构建目标重审 modern 与 legacy 的取舍。
++- 包 README 在 Known Limitations 下记录了 legacy 取舍。
+diff --git a/.agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.i18n.yaml b/.agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.i18n.yaml
+new file mode 100644
+index 0000000000..b523f7da3e
+--- /dev/null
++++ b/.agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.i18n.yaml
+@@ -0,0 +1,6 @@
++# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
++# side as of the last confirmed-consistent state. Both languages carry equal authority;
++# after editing either side, bring the other along and re-record with:
++#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.md
++2026-09-10-pre-119-browser-support.md: 54985916617cf1cf2189083a75f64437ea0913cd
++2026-09-10-pre-119-browser-support.zh.md: 5072e7e8b90b7eab12646b8d7ded873b86ea0535
+diff --git a/.agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.md b/.agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.md
+new file mode 100644
+index 0000000000..5498591661
+--- /dev/null
++++ b/.agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.md
+@@ -0,0 +1,26 @@
++# Agent Note: Web shell supports pre-119 browsers via compat shims and a ponyfilled boot tail
++
++Status: implemented
++
++English | [中文](2026-09-10-pre-119-browser-support.zh.md)
++
++## Problem
++
++After the PDF.js legacy fix, old browsers still failed differently: a Chrome 111 page showed permanent "reconnecting" with no workspaces or models, plus `Promise.withResolvers is not a function` / `AbortSignal.any is not a function`. Client bundles call both APIs across the connection, session, and preview paths, but they are runtime APIs the es2024 build target does not polyfill (`withResolvers` needs Chrome 119+, `AbortSignal.any` Chrome 116+). The connection generation died during setup on those browsers. A further instance of the same class hid in the served index itself: the host-injected boot-readiness tail called `Promise.withResolvers()` in a classic script that runs before any shell module, so no module-level shim could cover it. Related: [PDF.js legacy build](2026-09-10-pdfjs-legacy-build.md) covers the `Iterator`/`Promise.try` gap for the preview dependency; this note covers the first-party gaps.
++
++## Decision
++
++- New `apps/web/src/compat.ts`, imported first in `main.ts`: installs `Promise.withResolvers` and `AbortSignal.any` only when missing, dependency-free, before every plugin entry evaluates. Verified bundled at the top of the shell entry.
++- `packages/host/webserver/src/injections.ts`: the `READY_MARKUP` tail builds the deferred inline (`var d = {}; d.promise = new Promise(...)`) instead of calling `Promise.withResolvers()`; the webserver spec asserts the new string.
++- No other shims: `Promise.try`/`Array.fromAsync`/`Object.groupBy` have no first-party callers, and `Array.at`/`Object.hasOwn`/`structuredClone` already exist on the supported floor (Chrome ~92+).
++
++## Alternatives considered
++
++**Tell affected users to update.** Rejected: the household runs a Catalina-capped Chrome and older phones; several cannot move past Chrome 111.
++
++**Shim inside each calling package.** Rejected: the call sites span connection, gateway, workspace, and preview packages; one shell-level module covers them all including future callers, and the tail script needs its own inline form regardless.
++
++## Consequences
++
++- Chrome 111 emulation (all four globals removed) loads sessions over the gateway with a stable WebSocket, zero reconnect text, and zero console errors; modern Chromium regressed clean.
++- `git pull` note: `compat.ts` is a new file (merge-immune); `main.ts` and `injections.ts` hunks are small and local. A post-merge hook rebuilds the web shell and the webserver lib (see `dsh-public-gateway-src/PROTECT.md` §5).
+diff --git a/.agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.zh.md b/.agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.zh.md
+new file mode 100644
+index 0000000000..5072e7e8b9
+--- /dev/null
++++ b/.agents/notes/implemented/bug-fix/2026-09-10-pre-119-browser-support.zh.md
+@@ -0,0 +1,44 @@
++# Agent Note：Web 壳通过兼容补齐与 ponyfill 引导尾支持 pre-119 浏览器
++
++Status: implemented
++
++[English](2026-09-10-pre-119-browser-support.md) | 中文
++
++## Problem
++
++PDF.js legacy 修复之后，老浏览器换了一种方式失败：Chrome 111 页面永久"重连中"，
++工作区与模型刷不出来，并报 `Promise.withResolvers is not a function` /
++`AbortSignal.any is not a function`。连接、会话、预览链路都在调这两个 API，
++但它们是 es2024 构建目标不补的运行时 API（withResolvers 要 Chrome 119+，
++AbortSignal.any 要 Chrome 116+），连接 generation 在 setup 阶段就死掉。
++同类问题还藏在首页本身：host 注入的 boot-readiness 尾脚本在所有壳模块之前
++执行的 classic script 里直接调 `Promise.withResolvers()`，模块级 shim 盖不住它。
++相关：[PDF.js legacy build](2026-09-10-pdfjs-legacy-build.zh.md) 覆盖预览依赖的
++`Iterator`/`Promise.try` 缺口；本 note 覆盖第一方代码的缺口。
++
++## Decision
++
++- 新建 `apps/web/src/compat.ts`，`main.ts` 首行导入：缺失时才安装
++  `Promise.withResolvers` 与 `AbortSignal.any`，零依赖，在所有插件入口求值之前
++  生效。已确认打进壳入口最前面。
++- `packages/host/webserver/src/injections.ts`：`READY_MARKUP` 尾改成内联构造
++  deferred（`var d = {}; d.promise = new Promise(...)`），不再调
++  `Promise.withResolvers()`；webserver 单测断言新字符串。
++- 不再补其它：`Promise.try`/`Array.fromAsync`/`Object.groupBy` 在第一方无调用；
++  `Array.at`/`Object.hasOwn`/`structuredClone` 在支持基线（Chrome ~92+）上原生就有。
++
++## Alternatives considered
++
++**让用户升级浏览器。** 否决：家里有卡在 Catalina 的 Chrome 和旧手机，
++其中几个升不到 Chrome 111 以后。
++
++**每个调用包各自补。** 否决：调用点横跨 connection、gateway、workspace、
++preview 等包，壳级一个模块全盖住（含未来的调用者）；尾脚本本来就要内联形式。
++
++## Consequences
++
++- Chrome 111 模拟（四个全局全删）经网关加载会话，WebSocket 稳定不断，
++  无重连文案，零控制台报错；现代 Chromium 回归干净。
++- `git pull` 注意：`compat.ts` 是新文件（合并免疫）；`main.ts` 与
++  `injections.ts` 的改动很小且局部。post-merge 钩子负责重打 web 壳与
++  webserver lib（见 `dsh-public-gateway-src/PROTECT.md` §5）。
+diff --git a/apps/web/src/compat.ts b/apps/web/src/compat.ts
+new file mode 100644
+index 0000000000..69994d4350
+--- /dev/null
++++ b/apps/web/src/compat.ts
+@@ -0,0 +1,50 @@
++/**
++ * Pre-ES2025 runtime shims for browsers the es2024 build target leaves behind.
++ *
++ * Client bundles call `Promise.withResolvers` (Chrome 119+) and
++ * `AbortSignal.any` (Chrome 116+) across the connection, session, and preview
++ * paths; both are runtime APIs the es2024 target does not polyfill. Without
++ * them the connection generation dies during setup and the shell sits on
++ * "reconnecting" with no workspaces or models. Each shim installs only when
++ * its API is missing and mirrors the standard semantics: deferred
++ * resolve/reject capture for withResolvers, and a signal that aborts when any
++ * input aborts (already-aborted inputs win first). This module stays
++ * dependency-free and main.ts imports it first so it evaluates before every
++ * plugin entry.
++ */
++
++if (typeof Promise.withResolvers !== 'function') {
++  Promise.withResolvers = function withResolvers<T>(): {
++    promise: Promise<T>
++    resolve: (value: T | PromiseLike<T>) => void
++    reject: (reason?: unknown) => void
++  } {
++    let resolve: (value: T | PromiseLike<T>) => void = () => {}
++    let reject: (reason?: unknown) => void = () => {}
++    const promise = new Promise<T>((res, rej) => {
++      resolve = res
++      reject = rej
++    })
++    return { promise, resolve, reject }
++  }
++}
++
++interface AbortSignalAny {
++  any?: (signals: Iterable<AbortSignal>) => AbortSignal
++}
++
++const signalStatics = AbortSignal as unknown as AbortSignalAny
++if (typeof signalStatics.any !== 'function') {
++  signalStatics.any = (signals: Iterable<AbortSignal>): AbortSignal => {
++    const controller = new AbortController()
++    for (const signal of signals) {
++      if (signal.aborted) {
++        controller.abort(signal.reason)
++        break
++      }
++      const input = signal
++      input.addEventListener('abort', () => { controller.abort(input.reason) }, { once: true })
++    }
++    return controller.signal
++  }
++}
+diff --git a/apps/web/src/main.ts b/apps/web/src/main.ts
+index 2ff361f3db..6ed9b51141 100644
+--- a/apps/web/src/main.ts
++++ b/apps/web/src/main.ts
+@@ -1,4 +1,5 @@
+ /** Browser entry for the Web client. */
++import './compat.ts'
+ import { AppWebEntry } from '@deepseek-ai/dsh-client-web'
+ 
+ const el = document.getElementById('root')
+diff --git a/packages/client/ui-sidebar-documentpreview/README.md b/packages/client/ui-sidebar-documentpreview/README.md
+index e3659ed08a..28a9445b41 100644
+--- a/packages/client/ui-sidebar-documentpreview/README.md
++++ b/packages/client/ui-sidebar-documentpreview/README.md
+@@ -78,6 +78,7 @@ No direct effect; what the user reads here never enters a model request.
+ - **Finite local HTML dependencies.** Only direct classic `.js` and stylesheet `.css` references are packed. Browser-resolved resources retain browser origin and network restrictions; no runtime file-read bridge is exposed to the iframe.
+ - **Package-local wrap glyphs.** `IconWrapFill16` and `IconNowrapFill16` live in `src/client/icons.tsx` until the shared icon set carries them; their props already match the shared icon contract.
+ - **Scroll writes are unthrottled.** Every scroll event records its offset in the store; the line blocks are memoized so the resulting re-render hands React the same elements back.
++- **PDF.js tracks the legacy build.** The viewer bundles `pdfjs-dist/legacy` (same 6.3.289 API plus its maintained core-js polyfills) instead of the modern build, so browsers without ES2025 `Iterator` helpers still import the viewer instead of failing the whole plugin screen; the real-library smoke renders through that same build.
+ 
+ <a id="dev-note"></a>
+ ### Dev Note
+diff --git a/packages/client/ui-sidebar-documentpreview/README.zh.md b/packages/client/ui-sidebar-documentpreview/README.zh.md
+index 29393ed6b8..975aa7e4e4 100644
+--- a/packages/client/ui-sidebar-documentpreview/README.zh.md
++++ b/packages/client/ui-sidebar-documentpreview/README.zh.md
+@@ -78,6 +78,7 @@ PNG、JPEG、GIF、WebP、BMP、ICO 和 SVG 通过 Blob URL 在 `<img>` 静态
+ - **本地 HTML 依赖集合有限。** 只打包直接引用的经典 `.js` 脚本和 `.css` 样式表。浏览器解析的资源仍受浏览器源与网络规则限制；iframe 不获得运行时文件读取桥接。
+ - **换行图标为包内自绘。** `IconWrapFill16` 与 `IconNowrapFill16` 住在 `src/client/icons.tsx`，直到共享图标集提供为止；它们的 props 已与共享图标契约一致。
+ - **滚动写入未节流。** 每次滚动事件都把偏移记进 store；行块已 memo 化，于是由此引发的重渲染交还给 React 的是同一批元素。
++- **PDF.js 跟随 legacy 构建。** 查看器打包的是 `pdfjs-dist/legacy`（与 6.3.289 同 API，另带其官方 core-js polyfill），而非 modern 构建；没有 ES2025 `Iterator` 的浏览器也能载入查看器，不会拖累整个插件屏。真库 smoke 同样走该构建渲染。
+ 
+ <a id="dev-note"></a>
+ ### 开发备注
+diff --git a/packages/client/ui-sidebar-documentpreview/src/client/pdf/asset-imports.d.ts b/packages/client/ui-sidebar-documentpreview/src/client/pdf/asset-imports.d.ts
+index 2eaf820507..fdbb10614a 100644
+--- a/packages/client/ui-sidebar-documentpreview/src/client/pdf/asset-imports.d.ts
++++ b/packages/client/ui-sidebar-documentpreview/src/client/pdf/asset-imports.d.ts
+@@ -1,5 +1,13 @@
+ /** Type declaration for the build-owned PDF.js worker source. */
+-declare module 'pdfjs-dist/build/pdf.worker.min.mjs?raw' {
++declare module 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?raw' {
+   const source: string
+   export default source
+ }
++
++/**
++ * The legacy main-thread build ships minified without sibling types; it is
++ * the same version and API as the root entry, so reuse those declarations.
++ */
++declare module 'pdfjs-dist/legacy/build/pdf.min.mjs' {
++  export * from 'pdfjs-dist'
++}
+diff --git a/packages/client/ui-sidebar-documentpreview/src/client/pdf/assets.ts b/packages/client/ui-sidebar-documentpreview/src/client/pdf/assets.ts
+index ead314c499..06c52b9e2a 100644
+--- a/packages/client/ui-sidebar-documentpreview/src/client/pdf/assets.ts
++++ b/packages/client/ui-sidebar-documentpreview/src/client/pdf/assets.ts
+@@ -1,5 +1,5 @@
+ /** Build-owned, same-version PDF.js resources; all binary assets are decoded locally. */
+-import workerSource from 'pdfjs-dist/build/pdf.worker.min.mjs?raw'
++import workerSource from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?raw'
+ 
+ export { workerSource }
+ 
+diff --git a/packages/client/ui-sidebar-documentpreview/src/client/pdf/document.ts b/packages/client/ui-sidebar-documentpreview/src/client/pdf/document.ts
+index e256ef110c..9f4cad0cb4 100644
+--- a/packages/client/ui-sidebar-documentpreview/src/client/pdf/document.ts
++++ b/packages/client/ui-sidebar-documentpreview/src/client/pdf/document.ts
+@@ -1,5 +1,5 @@
+ /** Canvas rendering with cancellation and page cleanup, shared by the PDF body and real-library smoke. */
+-import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
++import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist/legacy/build/pdf.min.mjs'
+ 
+ /** The document operations used by one mounted PDF body. */
+ export type PdfDocument = Pick<PDFDocumentProxy, 'numPages' | 'getPage'>
+diff --git a/packages/client/ui-sidebar-documentpreview/src/client/pdf/runtime.ts b/packages/client/ui-sidebar-documentpreview/src/client/pdf/runtime.ts
+index e06cb36d44..b45955deba 100644
+--- a/packages/client/ui-sidebar-documentpreview/src/client/pdf/runtime.ts
++++ b/packages/client/ui-sidebar-documentpreview/src/client/pdf/runtime.ts
+@@ -1,5 +1,5 @@
+ /** One real module Worker and PDF.js loading task per mounted binary document. */
+-import { getDocument, PDFWorker } from 'pdfjs-dist'
++import { getDocument, PDFWorker } from 'pdfjs-dist/legacy/build/pdf.min.mjs'
+ import { createPdfBinaryDataFactory, workerSource } from './assets.ts'
+ import type { PdfSession } from './document.ts'
+ import { PdfWorkerFailure } from './errors.ts'
+diff --git a/packages/client/ui-sidebar-documentpreview/tests/pdf-document.client.spec.ts b/packages/client/ui-sidebar-documentpreview/tests/pdf-document.client.spec.ts
+index 8f4b7c3617..91e8419b8b 100644
+--- a/packages/client/ui-sidebar-documentpreview/tests/pdf-document.client.spec.ts
++++ b/packages/client/ui-sidebar-documentpreview/tests/pdf-document.client.spec.ts
+@@ -1,7 +1,7 @@
+ // @vitest-environment jsdom
+ /** Page rendering cancellation is driven by controlled pdfjs promises, not scheduler delays. */
+ import { describe, expect, it, vi } from 'vitest'
+-import type { PDFPageProxy } from 'pdfjs-dist'
++import type { PDFPageProxy } from 'pdfjs-dist/legacy/build/pdf.min.mjs'
+ import { renderPdfPage } from '../src/client/pdf/document.ts'
+ 
+ describe('PDF canvas rendering', () => {
+diff --git a/packages/client/ui-sidebar-documentpreview/tests/pdf-runtime.client.spec.ts b/packages/client/ui-sidebar-documentpreview/tests/pdf-runtime.client.spec.ts
+index bcbdf9d6ec..f6f2181288 100644
+--- a/packages/client/ui-sidebar-documentpreview/tests/pdf-runtime.client.spec.ts
++++ b/packages/client/ui-sidebar-documentpreview/tests/pdf-runtime.client.spec.ts
+@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ import type { PdfDocument, PdfSession } from '../src/client/pdf/document.ts'
+ 
+ const api = vi.hoisted(() => ({ getDocument: vi.fn(), createWorker: vi.fn(), destroyBridge: vi.fn() }))
+-vi.mock('pdfjs-dist', () => ({ getDocument: api.getDocument, PDFWorker: { create: api.createWorker } }))
++vi.mock('pdfjs-dist/legacy/build/pdf.min.mjs', () => ({ getDocument: api.getDocument, PDFWorker: { create: api.createWorker } }))
+ vi.mock('../src/client/pdf/assets.ts', () => ({
+   workerSource: 'export const WorkerMessageHandler = {}',
+   createPdfBinaryDataFactory: () => class { fetch() { return Promise.resolve(new Uint8Array()) } },
+diff --git a/packages/client/ui-sidebar-documentpreview/tsdown.config.ts b/packages/client/ui-sidebar-documentpreview/tsdown.config.ts
+index a31dee8d5a..224715d8c7 100644
+--- a/packages/client/ui-sidebar-documentpreview/tsdown.config.ts
++++ b/packages/client/ui-sidebar-documentpreview/tsdown.config.ts
+@@ -6,7 +6,7 @@ import { clientBundle } from '../tsdown.client.ts'
+ 
+ const bundle = clientBundle('@deepseek-ai/dsh-client-ui-sidebar-documentpreview', ['lib/types/index.js'])
+ const require = createRequire(import.meta.url)
+-const workerSpecifier = 'pdfjs-dist/build/pdf.worker.min.mjs?raw'
++const workerSpecifier = 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?raw'
+ const workerModule = '\0dsh-pdf-worker.mjs'
+ 
+ /** License files for PDF.js and the data embedded beside its runtime. */
+@@ -45,7 +45,7 @@ const pdfWorker: NonNullable<UserConfig['plugins']> = [{
+   },
+   load(id) {
+     if (id !== workerModule) return null
+-    const path = require.resolve('pdfjs-dist/build/pdf.worker.min.mjs')
++    const path = require.resolve('pdfjs-dist/legacy/build/pdf.worker.min.mjs')
+     this.addWatchFile(path)
+     return `export default ${JSON.stringify(readFileSync(path, 'utf8'))};`
+   },
+diff --git a/packages/host/webserver/src/injections.ts b/packages/host/webserver/src/injections.ts
+index 5b431918f5..03af6731bd 100644
+--- a/packages/host/webserver/src/injections.ts
++++ b/packages/host/webserver/src/injections.ts
+@@ -82,8 +82,10 @@ function splice(html: string, at: number, markup: string): string {
+  * applies the table asynchronously installs it ahead of the entry module and
+  * settles it after the last row; the served form below creates and resolves
+  * it in one statement, because every row is already in the document text.
++ * The deferred is built inline instead of `Promise.withResolvers()` so the
++ * tail runs on pre-119 browsers before the shell compat module evaluates.
+  */
+-const READY_MARKUP = '<script>(globalThis.__DSH_BOOT_READY__ ??= Promise.withResolvers()).resolve()</script>'
++const READY_MARKUP = '<script>(globalThis.__DSH_BOOT_READY__ ??= (function () { var d = {}; d.promise = new Promise(function (res, rej) { d.resolve = res; d.reject = rej; }); return d; })()).resolve()</script>'
+ 
+ /**
+  * Render rows into an index.html body: head rows immediately after the
+diff --git a/packages/host/webserver/tests/webserver.spec.ts b/packages/host/webserver/tests/webserver.spec.ts
+index b7ac506b17..28dfc85044 100644
+--- a/packages/host/webserver/tests/webserver.spec.ts
++++ b/packages/host/webserver/tests/webserver.spec.ts
+@@ -352,7 +352,7 @@ describe('real Loader composition', () => {
+       { kind: 'script', placement: 'head', text: 'H' },
+       { kind: 'script', placement: 'body', text: 'B' },
+     ])).toBe('<script>H</script><main>x</main><script>B</script>'
+-      + '<script>(globalThis.__DSH_BOOT_READY__ ??= Promise.withResolvers()).resolve()</script>')
++      + '<script>(globalThis.__DSH_BOOT_READY__ ??= (function () { var d = {}; d.promise = new Promise(function (res, rej) { d.resolve = res; d.reject = rej; }); return d; })()).resolve()</script>')
+   })
+ 
+   it('fails the fiber when the port is already taken (fail-loud at activation)', { timeout: 60_000 }, async () => {
+diff --git a/packages/settings/settings/src/index.ts b/packages/settings/settings/src/index.ts
+index 232364b4e8..ae31837e45 100644
+--- a/packages/settings/settings/src/index.ts
++++ b/packages/settings/settings/src/index.ts
+@@ -891,3 +891,37 @@ export interface SettingsSectionHooks<T> {
+ }
+ 
+ export default SettingsProvider
++/**
++ * Validate a settings namespace for third-party section registration.
++ * @param value - candidate namespace string.
++ * @returns the value branded as a SettingsNamespace.
++ */
++export function settingsNamespace(value: string): SettingsNamespace {
++  return parseSettingsNamespace(value)
++}
++
++export function installSettingsSection<T>(
++  ctx: Context,
++  ns: SettingsNamespace,
++  schema: z<T>,
++  entry: T,
++  hooks: SettingsSectionHooks<T>,
++): void {
++  ctx.inject(['settings'], (sctx) => {
++    const scope = sctx.settings.register(ns, schema, {
++      base: entry,
++      ...(hooks.validate === undefined ? {} : { validate: hooks.validate }),
++    })
++    hooks.setSource(() => scope.get())
++    sctx.effect(() => () => {
++      if (isUnloading(ctx)) return
++      hooks.setSource(() => entry)
++      hooks.onChange()
++    })
++    hooks.onChange()
++    scope.watch(() => {
++      if (isUnloading(ctx)) return
++      hooks.onChange()
++    })
++  })
++}
+-- 
+2.43.7
+

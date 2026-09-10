@@ -1,0 +1,43 @@
+# dsh-public-gateway 配置文件
+# 修改后执行:  systemctl --user restart dsh-public-gateway
+# 注意：密码建议用环境变量注入（见 systemd unit 的 Environment=，
+#       写在此文件的密码请确保文件权限 600。
+
+# 网关监听（对公网开放）
+listen_host = 0.0.0.0
+listen_port = 9080
+
+# 后端 dsh web 地址
+dsh_host = 127.0.0.1
+dsh_port = 3080
+
+# dsh 日志路径（网关从中提取访问 token）
+dsh_log = /var/log/dsh/dsh-web.log
+dsh_log_rotated = /var/log/dsh/dsh-web.log.1
+
+# 初始版后端（web-vanilla profile，仅官方 bundle；systemd 服务 dsh-web-vanilla）
+vanilla_host = 127.0.0.1
+vanilla_port = 3081
+vanilla_log = /var/log/dsh/dsh-web-vanilla.log
+vanilla_log_rotated = /var/log/dsh/dsh-web-vanilla.log.1
+
+# 登录会话有效期（天）
+session_max_age_days = 30
+
+# 账号认证（登录页表单；旧 Basic 客户端仍兼容，视为完整版模式）
+# 安装后务必修改；推荐留空并改用 gateway.env 注入。
+user = change-me
+pass = change-me
+
+# 登录失败锁定（分级）
+stage1_fails = 3
+stage1_lock  = 60
+stage2_fails = 3
+stage2_lock  = 1800
+
+# token 刷新间隔（秒）
+token_refresh_sec = 2
+
+# 后端连接 / 读取超时（秒）
+backend_connect_timeout = 30
+backend_read_timeout = 120
