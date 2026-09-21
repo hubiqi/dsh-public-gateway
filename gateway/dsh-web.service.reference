@@ -6,7 +6,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/opc/deepseek-harness
 Environment=PATH=/home/opc/.nvm/versions/node/v24.21.0/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/home/opc/.nvm/versions/node/v24.21.0/bin/corepack pnpm dsh web --port 3080 --trusted-host <你的公网IP>:9080 --trusted-host <你的公网IP> --no-open
+ExecStart=/path/to/node /path/to/deepseek-harness/apps/cli/lib/bin.js web --port 3080 --trusted-host <你的公网IP>:9080 --trusted-host <你的公网IP> --no-open
 Restart=always
 RestartSec=3
 Environment=NODE_ENV=production

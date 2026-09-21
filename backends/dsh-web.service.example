@@ -12,7 +12,14 @@ WorkingDirectory=/path/to/deepseek-harness
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 # 关键: --trusted-host 必须包含网关的公网地址，否则经网关的请求会被拒绝；
 # 日志必须落在持久化路径（网关从中提取访问 token），不要写 /tmp。
-ExecStart=corepack pnpm dsh web --port 3080 --trusted-host <你的公网IP>:9080 --trusted-host <你的公网IP> --no-open
+#
+# ★ 入口必须用**构建版** apps/cli/lib/bin.js（先跑过 `pnpm run build`），
+#   不要用 `pnpm dsh web`：后者是 tsx 源码入口，会让 tsconfig paths 把一部分
+#   包解析到 src/、另一部分落到 lib/，同一个包被加载成两份，unique symbol
+#   对不上 —— PTC 模式（run_code）会报
+#   "Cannot read properties of undefined (reading 'prepare')"，整轮直接失败。
+#   改成你的 node 可执行文件，例: /home/<你>/.nvm/versions/node/v24.21.0/bin/node
+ExecStart=/path/to/node /path/to/deepseek-harness/apps/cli/lib/bin.js web --port 3080 --trusted-host <你的公网IP>:9080 --trusted-host <你的公网IP> --no-open
 Restart=always
 RestartSec=3
 Environment=NODE_ENV=production

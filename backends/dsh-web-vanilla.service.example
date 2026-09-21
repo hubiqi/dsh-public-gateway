@@ -11,7 +11,9 @@ WorkingDirectory=/path/to/deepseek-harness
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 # web-vanilla profile 仅官方 bundle（见 ../web-vanilla-profile），无第三方插件；
 # 网关「初始版」开关反代到这里，是插件弄崩完整版时的兜底。
-ExecStart=corepack pnpm dsh --profile web-vanilla --port 3081 --no-open
+# ★ 同 dsh-web.service.example：入口用构建版 apps/cli/lib/bin.js，不要用
+#   `pnpm dsh`（tsx 源码入口会 src/lib 混载，PTC 模式必崩）。
+ExecStart=/path/to/node /path/to/deepseek-harness/apps/cli/lib/bin.js --profile web-vanilla --port 3081 --no-open
 Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
