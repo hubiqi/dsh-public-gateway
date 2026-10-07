@@ -31,6 +31,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import gzip
 import http.client
 import json
 import os
@@ -43,6 +44,7 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 try:
     from urllib.parse import parse_qsl, quote
 except ImportError:  # Python 2 不再支持，仅为极端回退保留
@@ -997,11 +999,13 @@ class Handler(BaseHTTPRequestHandler):
     def fetch(self, path, body, backend):
         headers = {}
         for k, v in self.headers.items():
-            # accept-encoding 必须去掉：后端回 gzip 时 _inject_html 看不到明文，
-            # ownsHost 注入被静默跳过，非 loopback 页会降级为 memory 设置。
-            # 回环链路压缩没有收益，直接要明文。
-            if k.lower() in HOP_BY_HOP or k.lower() in ("host", "origin", "referer",
-                                                       "accept-encoding"):
+            # host/origin/referer 仍然重写；accept-encoding 交给下面按需设置。
+            # 注意：网关是给【公网客户端】用的，不再压缩等于把十几 MB 的
+            # 前端产物原样推过公网（实测入口 JS 634KB→238KB、模块包 11.1MB→5.5MB）。
+            # 但 HTML 必须能被 _inject_html 看到明文，所以只在能解压时放行 gzip。
+            if k.lower() in HOP_BY_HOP or k.lower() in ("host", "origin", "referer"):
+                continue
+            if k.lower() == "accept-encoding":
                 continue
             headers[k] = v
         # dsh-market self-restart only accepts a *direct* same-origin loopback
@@ -1020,6 +1024,11 @@ class Handler(BaseHTTPRequestHandler):
             headers["X-Forwarded-For"] = self.client_ip()
             headers["X-Forwarded-Proto"] = "http"
         headers["Origin"] = "http://%s:%d" % (backend["host"], backend["port"])
+        # 只向客户端声明支持的编码里协商 gzip：stdlib 能解 gzip/deflate，
+        # 解不了 br；HTML 解不开就没法注入 ownsHost。非 HTML 原样透传压缩流。
+        _client_ae = (self.headers.get("Accept-Encoding") or "").lower()
+        if "gzip" in _client_ae:
+            headers["Accept-Encoding"] = "gzip"
         conn = http.client.HTTPConnection(
             backend["host"], backend["port"], timeout=BACKEND_READ_TIMEOUT)
         try:
@@ -1028,7 +1037,8 @@ class Handler(BaseHTTPRequestHandler):
             data = resp.read()
             return resp.status, resp.getheaders(), data
         except Exception as exc:
-            log("proxy error [%s]: %s" % (backend["label"], exc))
+            log("proxy error [%s]: %s %s: %s"
+                % (backend["label"], self.command, path, exc))
             msg = "Bad gateway: %s\n" % exc
             return 502, [("Content-Type", "text/plain; charset=utf-8")], msg.encode("utf-8")
         finally:
@@ -1082,12 +1092,25 @@ class Handler(BaseHTTPRequestHandler):
         if status != 200 or not data:
             return data
         ctype = ""
+        cenc = ""
         for _hk, _hv in headers:
-            if _hk.lower() == "content-type":
+            _hl = _hk.lower()
+            if _hl == "content-type":
                 ctype = _hv.lower()
-                break
+            elif _hl == "content-encoding":
+                cenc = _hv.lower()
         if "text/html" not in ctype:
             return data
+        if cenc:
+            plain = _decompress_body(cenc, data)
+            if plain is None:
+                # 解不开就原样透传：宁可少一次 ownsHost 注入，也不能白屏。
+                log("html decode failed (%s); passing through" % cenc)
+                return data
+            data = plain
+            # 已经解压：必须把 content-encoding 摘掉，否则浏览器会再解一次
+            headers[:] = [(hk, hv) for (hk, hv) in headers
+                          if hk.lower() != "content-encoding"]
         try:
             body_text = data.decode("utf-8", "ignore")
             low = body_text.lower()
@@ -1132,6 +1155,23 @@ def _merge_cookie(cookie, set_cookie_values):
     for _, pair in pairs:
         kept.append(pair)
     return "; ".join(kept)
+
+def _decompress_body(encoding, data):
+    """按 content-encoding 解压响应体；不支持或失败返回 None。"""
+    enc = (encoding or "").lower()
+    try:
+        if "gzip" in enc:
+            return gzip.decompress(data)
+        if "deflate" in enc:
+            try:
+                return zlib.decompress(data)
+            except Exception:
+                # 有些后端发 raw deflate（无 zlib 头）
+                return zlib.decompress(data, -zlib.MAX_WBITS)
+    except Exception:
+        return None
+    return None
+
 
 def _append_set_cookie(headers, set_cookie_values):
     """HTTP 路径：把 Set-Cookie 行追加到响应头列表。

@@ -240,6 +240,41 @@ if _pure.startswith("/plugins/") and "??" in _pure:
 实测（经网关带会话）：`mode=live`、`composer=true`、29 个资源全 200、运行时错误 0，
 页面停在应用主界面 —— 服务侧链路是通的。
 
+### 7. 不要剥掉 `accept-encoding`（网关已改）
+
+网关为了让 `_inject_html` 看到明文 HTML，原本对**所有**请求剥掉 `accept-encoding`。
+但它是给**公网客户端**用的：不压缩等于把十几 MB 的前端产物原样推过公网，
+弱网（手机）下极慢甚至“打不开”。实测压缩收益：
+
+| 资源 | 原样 | gzip | 省 |
+| --- | --- | --- | --- |
+| `index-*.js` | 634 KB | 238 KB | 62% |
+| `vendor-*.js` | 741 KB | 210 KB | 72% |
+| 两个 CSS | 106 KB | 27 KB | 74% |
+| **主要静态资源合计** | **1.48 MB** | **475 KB** | **68%** |
+| `??` 大模块包 | 11.1 MB | 5.5 MB | 50% |
+
+现在的策略：**只向客户端声明支持的编码里协商 gzip**，HTML 解压 → 注入 → 摘掉
+`content-encoding`（`_decompress_body()`，stdlib 能解 gzip/deflate，**解不了 br**，
+所以不协商 br）；JS/CSS 等原样透传压缩流，网关不解不重压。
+解压失败则原样透传并记日志——宁可少一次注入，也不能白屏。
+
+### 8. 先判服务，再判网络
+
+“打不开”时按这个顺序排除，别一上来就怀疑本机网络：
+
+```sh
+# ① 服务器本地直连后端
+curl -o /dev/null -w "%{http_code} %{time_total}s\n" http://127.0.0.1:3080/
+# ② 服务器本地访问网关（未登录 401 属正常）
+curl -o /dev/null -w "%{http_code} %{time_total}s\n" http://127.0.0.1:9080/
+# ③ 服务器用【公网 IP】访问自己 —— 这条通说明端口转发/回环没问题
+curl -o /dev/null -w "%{http_code} %{time_total}s\n" http://<公网IP>:9080/
+```
+
+三条都正常 ⇒ 服务侧与端口转发都没问题，问题在客户端到服务器的网络路径
+（用第 6 条的 CDP 法在服务器上复现一次，能直接看到真实客户端视角）。
+
 ## 验证
 
 - 公网访问登录页，完整版/原版切换正常，会话、模型、设置可用。
@@ -270,7 +305,7 @@ self-healing WebSocket proxy) plus every dsh-side compatibility fix that
 public access forced (pre-119 browser shims, gzip-safe host injection,
 legacy PDF build, settings boot fix) and post-update rebuild hooks.
 
-Four traps are documented under "已知坑":
+Eight traps are documented under "已知坑":
 
 1. Boot the backends from the built CLI (`apps/cli/lib/bin.js`), never from the
    tsx source entry `pnpm dsh` — the source entry loads some workspace packages
@@ -293,3 +328,18 @@ Four traps are documented under "已知坑":
    through the Python gateway. The gateway now strips the attribute, and the
    README documents the headless-chromium check that tells a real frontend
    failure apart from a bad client network.
+5. dsh fetches dozens of modules as one `/plugins/??pkg1,pkg2&rev=` URL, and that
+   route accepts cookies only — appending `?token=` returns 404. The gateway used
+   to do exactly that for clients without a `dsh-auth-` cookie, so their module
+   requests all failed and the app sat on "Loading plugins…"; it now exchanges a
+   cookie server-side instead.
+6. How to reproduce a client-side failure from the server with CDP (attach to the
+   page target, inject the gateway session cookie) — the reliable way to tell a
+   broken frontend from a bad network path.
+7. The gateway must not strip `accept-encoding`: it serves public clients, so an
+   uncompressed response pushes the whole (multi-MB) frontend over the internet.
+   It now negotiates gzip and decompresses only the HTML it has to rewrite —
+   measured 68% off the main static assets and 50% off the big module bundle.
+8. A diagnostics order for "the site won't open": check the backend and gateway
+   locally, then from the server against its own public IP (which proves port
+   forwarding), before blaming the client's network.
