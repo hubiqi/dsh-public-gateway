@@ -275,6 +275,50 @@ curl -o /dev/null -w "%{http_code} %{time_total}s\n" http://<公网IP>:9080/
 三条都正常 ⇒ 服务侧与端口转发都没问题，问题在客户端到服务器的网络路径
 （用第 6 条的 CDP 法在服务器上复现一次，能直接看到真实客户端视角）。
 
+### 9. 0.2.1 的 onboarding 图片把首屏撑到 14 MB（已修）
+
+0.2.1 引入 desktop-onboarding 后，`packages/client/ui-settings-account` 的
+`tsdown.config.ts` 里有个自定义插件，把 onboarding 插图**内联成 base64 data URI**：
+
+```js
+return `export default ${JSON.stringify(`data:image/png;base64,${data.toString('base64')}`)}`
+```
+
+源码里是 **8 张 3993×2481 / 1785×1530 的 PNG（共 3.6 MB）**，base64 再膨胀 33%
+⇒ 单个 `client.js` **5.2 MB**。而这个模块在**启动批次**里，每次打开页面都要下载，
+哪怕用户根本不会看到 onboarding。0.1.6 没有这个特性，属 0.2.1 回归。
+
+**修法（改图片本身，不动代码，零风险）**：降到 1200px 宽 + 保调色板 + 关抖动：
+
+```sh
+for f in *.png; do
+  convert "$f" -resize '1200x>' -strip -dither None -colors 255 \
+    -define png:compression-level=9 "out/$f"
+done
+```
+
+3.6 MB → 0.4 MB（省 89%），画质目视无损。重新 bundle 后 `client.js` 5.2 MB → 720 KB：
+
+```sh
+DSH_BUILD_FACE=client pnpm --filter @deepseek-ai/dsh-client-ui-settings-account run bundle
+systemctl --user restart dsh-web
+```
+
+**整页效果（实测经网关，含今天全部修复）**：
+
+| 阶段 | 首屏传输 |
+| --- | --- |
+| 修复前（网关不压缩 + 5.2 MB 内联图） | ~14.3 MB |
+| 网关 gzip 修复后 | ~7 MB |
+| onboarding 图片压缩后 | **2.5 MB**（CDP 实测，约 6 秒打开） |
+
+### 10. 0.2.1 新增插件版本门禁（详见第 3 条）
+
+另注：界面若报 `400 Model is unavailable`，是 `settings.yaml` 里配了网关
+不存在的模型 id（例如 `space-bunny-free`/`Union Alpha Free`/`DeepSeek V4.1 Flash`，
+网关实际只有 `space-bunny`/`deepseek-v4.1-flash` 等）。用
+`curl .../v1/models` 核对真实 id 再改配置。
+
 ## 验证
 
 - 公网访问登录页，完整版/原版切换正常，会话、模型、设置可用。
@@ -305,7 +349,7 @@ self-healing WebSocket proxy) plus every dsh-side compatibility fix that
 public access forced (pre-119 browser shims, gzip-safe host injection,
 legacy PDF build, settings boot fix) and post-update rebuild hooks.
 
-Eight traps are documented under "已知坑":
+Ten traps are documented under "已知坑":
 
 1. Boot the backends from the built CLI (`apps/cli/lib/bin.js`), never from the
    tsx source entry `pnpm dsh` — the source entry loads some workspace packages
@@ -343,3 +387,11 @@ Eight traps are documented under "已知坑":
 8. A diagnostics order for "the site won't open": check the backend and gateway
    locally, then from the server against its own public IP (which proves port
    forwarding), before blaming the client's network.
+9. dsh 0.2.1's new desktop onboarding inlines eight 4K PNGs as base64 into the
+   settings-account client bundle (3.6 MB of source art → a 5.2 MB bundle that the
+   boot batch loads on every visit), pushing the first paint to ~14 MB. Resizing
+   them to 1200px and keeping the palette cuts that 89%; with the two gateway
+   fixes the first load went from ~14.3 MB to 2.5 MB.
+10. A `400 Model is unavailable` in the UI usually means `settings.yaml` names a
+   model id the provider gateway does not have; check `/v1/models` for the real
+   ids.
