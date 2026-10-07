@@ -1085,6 +1085,11 @@ class Handler(BaseHTTPRequestHandler):
             end = low.find(">", pos)
             if end == -1:
                 return data
+            # dsh 前端产物给 module 脚本 / 预加载打了 crossorigin=""，
+            # 浏览器因此以 CORS 模式取这些【本已同源】的资源；经本网关
+            # （Python 3.6 ThreadingHTTPServer）时这类请求会挂起不返回，
+            # 应用永远停在 "Loading plugins…"。同源资源无需 CORS，剥离即可。
+            body_text = re.sub(r'\s+crossorigin(?:="[^"]*")?', '', body_text)
             extra = INJECT_JS_VANILLA if backend["title_prefix"] else ""
             body_text = (body_text[:end + 1] + INJECT_JS + extra
                          + body_text[end + 1:])

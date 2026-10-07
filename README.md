@@ -35,6 +35,8 @@ English summary below.
     `0001-*`（旧浏览器兼容）仍然是必需的。
   - `git-hooks/` dsh 更新后自动重建前端产物并重启后端的 hook，
     保证 `git pull` 不打断公网服务。
+  - `check-plugin-api.py` 放行第三方插件前的 API 核查工具
+    （peer 范围只是声明，真正决定能否运行的是符号有没有变，见「已知坑 3」）。
 
 ## 安装
 
@@ -94,18 +96,95 @@ ExecStart=<node> /path/to/deepseek-harness/apps/cli/lib/bin.js web --port 3080 .
 自检：`node apps/cli/lib/bin.js headless "用 run_code 执行 echo hello"`
 能正常返回结果即健康。
 
-### 2. merge-forward 之后必须重新构建
+### 2. merge-forward 之后必须重新构建（跨大版本升级更狠）
 
-上游合并常留下“半成品”：源码已更新、依赖已安装，但 `lib/` 还是旧的。此时
+上游合并常留下“半成品”：源码已更新、依赖已安装，但 `lib/` 还是旧的。症状：
 
 - 权限预设加载失败：`@deepseek-ai/dsh-permission-presets exports "./typert" but
   importing lib/typert.host.js failed: ERR_MODULE_NOT_FOUND`；
 - 启动日志刷出一串 `X (@deepseek-ai/dsh-…): failed to import` /
-  `N entries did not activate`（严重时 `llm-deepseek` 都起不来）。
+  `N entries did not activate`（严重时 `llm-deepseek` 都起不来）；
+- **后端直接起不来**（0.1.6 → 0.2.1 实测）：`dsh.bundle.patch` 由字符串改成数组，
+  旧 `app-boot/lib` 仍在 `path.join(packageDir, declared)` 上吃数组 →
+  `TypeError [ERR_INVALID_ARG_TYPE]: The "path" argument must be of type string.
+  Received an instance of Array`，vanilla 后端在 `activating / auto-restart` 里反复重启。
 
-修法：解决完冲突后 `pnpm run build`，再
-`systemctl --user restart dsh-web dsh-web-vanilla`。
+修法（跨大版本时三步都要做，缺一不可）：
+
+```sh
+# ① 清增量构建缓存，逼 tsc 全量重编 —— 否则过期 lib 不会被覆盖
+find . -name "*.tsbuildinfo" -not -path "*/node_modules/*" -delete
+
+# ② 清“空壳残留目录”：上游把包删了，本地 lib/ + node_modules/ 还在。
+#    tsc 忽略它们（不是有效包），tsdown 的 workspace glob packages/*/* 却会扫到，
+#    读到过期 lib 就报 [MISSING_EXPORT]，构建直接失败（实测 13 个）。
+find packages -mindepth 2 -maxdepth 2 -type d -not -exec test -f {}/package.json \; -print
+#    ↑ 先列出来核对（都是 git 不跟踪、只剩 lib/node_modules 的目录），备份后删掉
+
+# ③ 全量构建 + 重启
+pnpm run build && systemctl --user restart dsh-web dsh-web-vanilla
+```
+
 只跑 `pnpm install` 不够 —— 新包的 `lib/*.js` 与 typert host 产物都是构建出来的。
+
+### 3. 插件版本门禁（0.2.1+）
+
+0.2.1 起 dsh 按 peerDependencies 拦第三方插件，启动日志出现：
+
+```
+dsh: skipping profile bundle "X": Plugin X@ver is incompatible with dsh <runtime>:
+peerDependencies {...}. … grant the exact-version exemption for X@ver on dsh <runtime>
+with `dsh plugin allow-version` …
+```
+
+**先找有没有兼容的新版**（最干净），实测结果：
+
+| 插件 | 结论 |
+|---|---|
+| `dshmarket` | 升到 `1.66.9`（peer 含 `^0.2.0-rc.1`）即通过，**无需豁免** |
+| `@openviking/dsh-memory-plugin` | 最新 0.5.16 的 peer 仍止步 `^0.1.7-rc.2`，需豁免 |
+| `@dsh-external/dsh-normify` | 本地包，peer 写死 `<0.2.0`，需豁免 |
+
+真需要放行时（写进 `<profile>/compatibility.json`，可撤销）：
+
+```sh
+dsh plugin --profile web allow-version "<pkg>@<ver>" --dsh-version <exact-runtime> --accept-risk
+dsh plugin --profile web revoke-version "<pkg>@<ver>" --dsh-version <exact-runtime>
+dsh plugin --profile web version-exemptions      # 查看当前豁免
+```
+
+放行前**用证据判断 API 是否真的还在**——peer 范围只是声明：
+
+```sh
+# 列出插件从 @deepseek-ai/* 具名导入的符号，逐个对 dsh 的 lib/*.d.ts 校验
+python3 dsh-patches/check-plugin-api.py
+```
+
+（normify 的 `@deepseek-ai/cosmokit` 是它自己 vendor 的，报缺的 `Binary/Dict` 是类型，属误报。）
+
+### 4. 前端 module 脚本的 `crossorigin`（网关侧已剥离）
+
+dsh 前端产物给 `<script type="module">` 与 `modulepreload` 打了 `crossorigin=""`，
+浏览器因此以 CORS 模式取**本已同源**的资源；经 Python 网关（ThreadingHTTPServer）
+时这类请求会挂起不返回，应用永远停在 “Loading plugins…”。
+`gateway.py` 的 `_inject_html` 已顺手剥离（同源资源不需要 CORS）：
+
+```python
+body_text = re.sub(r'\s+crossorigin(?:="[^"]*")?', '', body_text)
+```
+
+**判断前端到底有没有起来，用服务器上的 chromium，别用手机网络下结论**
+（弱网/跨网时 fetch 会整片超时，看起来像“白屏坏了”）：
+
+```sh
+TOK=$(grep -o "token=[A-Za-z0-9_-]*" /var/log/dsh/dsh-web.log | tail -1 | cut -d= -f2)
+timeout 75 chromium-browser --headless=new --no-sandbox --disable-gpu \
+  --dump-dom "http://127.0.0.1:3080/?token=$TOK" > /tmp/dom.html
+grep -oE 'aria-label="[^"]{2,20}"' /tmp/dom.html | sort -u
+```
+
+DOM 里出现 `aria-label="Send message" / "New session" / "Settings"` 加 `contenteditable`
+即应用完整启动。⚠️ 别与 `--virtual-time-budget` 同用，会挂死超时、误判成“页面坏了”。
 
 ## 验证
 
@@ -116,9 +195,14 @@ ExecStart=<node> /path/to/deepseek-harness/apps/cli/lib/bin.js web --port 3080 .
 ## 适用基线
 
 dsh-patches 基于上游 `master @ aa8262ec09`（2026-09-10），`git am --3way`
-验证通过；网关模块不依赖 dsh 版本。已在 `master @ ddefc45fbc`
-（0.1.6-alpha.2）上 merge-forward 验证：补丁 0001 保留，0002/0003 由上游
-`session/writer-held` 取代。
+验证通过；网关模块不依赖 dsh 版本。
+
+已在两代上游上 merge-forward 验证：
+
+- `master @ ddefc45fbc`（0.1.6-alpha.2）：补丁 0001 保留，0002/0003 由上游
+  `session/writer-held` 取代；
+- `master @ 5badb15009`（**0.2.1-alpha.1**）：0001 仍需保留；后端入口、全量重建、
+  插件版本门禁、`crossorigin` 四类坑已写入「已知坑」（1–4）。
 
 License: same as deepseek-harness.
 
@@ -132,11 +216,26 @@ self-healing WebSocket proxy) plus every dsh-side compatibility fix that
 public access forced (pre-119 browser shims, gzip-safe host injection,
 legacy PDF build, settings boot fix) and post-update rebuild hooks.
 
-Two traps are documented under "已知坑": boot the backends from the built CLI
-(`apps/cli/lib/bin.js`), never from the tsx source entry `pnpm dsh` — the source
-entry loads some workspace packages from `src/` and others from `lib/`, so
-duplicate module instances make the unique tool-scheduler symbol unresolvable
-and every PTC (`run_code`) turn dies with
-"Cannot read properties of undefined (reading 'prepare')". And a merge-forward
-is only finished after `pnpm run build`, otherwise the new packages' `lib/`
-artifacts and typert host bundles are missing.
+Four traps are documented under "已知坑":
+
+1. Boot the backends from the built CLI (`apps/cli/lib/bin.js`), never from the
+   tsx source entry `pnpm dsh` — the source entry loads some workspace packages
+   from `src/` and others from `lib/`, so duplicate module instances make the
+   unique tool-scheduler symbol unresolvable and every PTC (`run_code`) turn
+   dies with "Cannot read properties of undefined (reading 'prepare')".
+2. A merge-forward is only finished after `pnpm run build` — and across a major
+   version you must also drop every `*.tsbuildinfo` (or tsc's incremental cache
+   keeps the stale `lib/`) and delete the stale package directories that upstream
+   removed but that linger locally with only `lib/` + `node_modules/`: tsc
+   ignores them, while tsdown's `packages/*/*` workspace glob reads their outdated
+   output and fails the build with `[MISSING_EXPORT]`.
+3. dsh 0.2.1+ gates third-party plugins on `peerDependencies` and silently skips
+   incompatible ones at boot. Prefer upgrading the plugin; otherwise grant an
+   exact-version exemption with `dsh plugin allow-version … --accept-risk`, and
+   check `dsh-patches/check-plugin-api.py` first to see whether the APIs the
+   plugin imports still exist.
+4. dsh's frontend emits `crossorigin=""` on its module scripts, which makes the
+   browser request same-origin resources in CORS mode; those requests hang
+   through the Python gateway. The gateway now strips the attribute, and the
+   README documents the headless-chromium check that tells a real frontend
+   failure apart from a bad client network.
