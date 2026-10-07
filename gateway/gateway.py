@@ -965,6 +965,18 @@ class Handler(BaseHTTPRequestHandler):
         body = self.read_body()
 
         if "dsh-auth-" not in cookie:
+            _pure = (path or "").split("?")[0]
+            if _pure.startswith("/plugins/") and "??" in _pure:
+                # dsh 的 ?? 批量模块 URL 不接受 ?token=（该路由只认 cookie），
+                # 追加 token 一律 404 —— 前端就永远停在 "Loading plugins…"。
+                # 改用服务端兑换到的 dsh-auth cookie 取，并顺手递给浏览器。
+                _healed = self._exchange_dsh_cookies(backend, token)
+                if _healed:
+                    self.headers["Cookie"] = _merge_cookie(cookie, _healed)
+                    _st, _hd, _data = self.fetch(path, body, backend)
+                    self.emit(_st, _append_set_cookie(_hd, _healed), _data,
+                              backend)
+                    return
             self.forward(_with_token(path, token), body, backend)
             return
 
@@ -1120,6 +1132,18 @@ def _merge_cookie(cookie, set_cookie_values):
     for _, pair in pairs:
         kept.append(pair)
     return "; ".join(kept)
+
+def _append_set_cookie(headers, set_cookie_values):
+    """HTTP 路径：把 Set-Cookie 行追加到响应头列表。
+    （101 升级走 _inject_set_cookie，那条操作的是原始字节。）"""
+    try:
+        out = list(headers)
+        for v in set_cookie_values:
+            out.append(("Set-Cookie", v))
+        return out
+    except Exception:
+        return headers
+
 
 def _inject_set_cookie(head, set_cookie_values):
     """往 101 响应头里追加 Set-Cookie 行；失败返回原头。"""

@@ -186,6 +186,60 @@ grep -oE 'aria-label="[^"]{2,20}"' /tmp/dom.html | sort -u
 DOM 里出现 `aria-label="Send message" / "New session" / "Settings"` 加 `contenteditable`
 即应用完整启动。⚠️ 别与 `--virtual-time-budget` 同用，会挂死超时、误判成“页面坏了”。
 
+### 5. `??` 批量模块 URL 不能被追加 `?token=`（网关已修）
+
+dsh 前端把几十个模块打包成一条 URL 取：
+
+```
+/plugins/??@deepseek-ai/dsh-client-ui-open-in-app/client.js,@deepseek-ai/dsh-api-gateway/client.js,…&rev=…
+```
+
+（注意：不是标准查询串，`?` 之后直接跟包名，多个包用 `,` 分隔，最后 `&rev=` 收尾。）
+
+**该路由只认 cookie，不接受 `token` 参数**——实测任何形式都不行：
+
+| 直连后端的请求 | 结果 |
+| --- | --- |
+| `…??<pkgs>&rev=xxx` | 200 |
+| `…??<pkgs>&rev=xxx&token=<valid>` | **404** |
+| `…??<pkgs>&token=<valid>&rev=xxx` | **404** |
+
+网关原本对「没有 `dsh-auth-` cookie 的客户端」一律走 `_with_token()` 追加 token，
+于是这类客户端的模块请求全部 404，前端永远停在 “Loading plugins…”。
+修法：这类 URL 改走**服务端兑换 cookie**（`_exchange_dsh_cookies`）取内容，
+并把兑换到的 cookie 一并递给浏览器：
+
+```python
+if _pure.startswith("/plugins/") and "??" in _pure:
+    _healed = self._exchange_dsh_cookies(backend, token)
+    if _healed:
+        self.headers["Cookie"] = _merge_cookie(cookie, _healed)
+        _st, _hd, _data = self.fetch(path, body, backend)
+        self.emit(_st, _append_set_cookie(_hd, _healed), _data, backend)
+        return
+```
+
+**排查提示**：这类 URL 里的 `&` 在 HTML 里是 `&amp;`，直接从 HTML 抠出来用它测会
+一路 404 —— 先 `html.unescape()` 再请求，否则会误判成网关坏了。
+
+### 6. 端到端验证：用 CDP 驱动服务器 chromium 走网关
+
+`--dump-dom` 只能验“渲染出来没渲染出来”，看不到运行时报错。要看清，用 CDP
+（服务器 Node 24 自带全局 `WebSocket`/`fetch`，不需要 puppeteer）：
+
+```
+启动 chromium --headless=new --remote-debugging-port=9334 --remote-allow-origins=*
+→ GET /json/version 拿 browser WS
+→ Target.attachToTarget {flatten:true} 拿 sessionId（之后所有命令都要带它；
+  浏览器级 WS 上直接调 Network.setCookie 会报 method not found）
+→ Network.setCookie 注入网关会话 cookie（curl 的 cookie 文件里 HttpOnly 行是
+  '#HttpOnly_' 前缀，别当注释跳过）
+→ Page.navigate + Runtime.enable 收异常
+```
+
+实测（经网关带会话）：`mode=live`、`composer=true`、29 个资源全 200、运行时错误 0，
+页面停在应用主界面 —— 服务侧链路是通的。
+
 ## 验证
 
 - 公网访问登录页，完整版/原版切换正常，会话、模型、设置可用。
