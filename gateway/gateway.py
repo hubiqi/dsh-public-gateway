@@ -966,6 +966,12 @@ class Handler(BaseHTTPRequestHandler):
         cookie = self.headers.get("Cookie", "")
         body = self.read_body()
 
+        if self._wants_stream():
+            # 事件流必须逐块透传，否则 resp.read() 等到超时（见 _stream_upstream）
+            _sp = path if "dsh-auth-" in cookie else _with_token(path, token)
+            self._stream_upstream(_sp, body, backend)
+            return
+
         if "dsh-auth-" not in cookie:
             _pure = (path or "").split("?")[0]
             if _pure.startswith("/plugins/") and "??" in _pure:
@@ -996,7 +1002,8 @@ class Handler(BaseHTTPRequestHandler):
             length = 0
         return self.rfile.read(length) if length > 0 else None
 
-    def fetch(self, path, body, backend):
+    def _upstream_headers(self, backend, path):
+        """构造转发给后端的请求头（普通请求与 SSE 流式共用）。"""
         headers = {}
         for k, v in self.headers.items():
             # host/origin/referer 仍然重写；accept-encoding 交给下面按需设置。
@@ -1029,6 +1036,66 @@ class Handler(BaseHTTPRequestHandler):
         _client_ae = (self.headers.get("Accept-Encoding") or "").lower()
         if "gzip" in _client_ae:
             headers["Accept-Encoding"] = "gzip"
+        return headers
+
+    def _wants_stream(self):
+        """客户端是否在要 SSE（浏览器的 EventSource 会带这个 Accept）。"""
+        return "text/event-stream" in (self.headers.get("Accept") or "").lower()
+
+    def _stream_upstream(self, path, body, backend):
+        """事件流透传：不缓冲、不等响应结束，逐块转发（chunked）。
+
+        后端的事件流（/plugins/events）会一直推且永不结束；走 fetch() 时
+        resp.read() 会等到 120s 超时再回 502，前端就永远停在「载入历史…」。
+        """
+        headers = self._upstream_headers(backend, path)
+        conn = http.client.HTTPConnection(
+            backend["host"], backend["port"], timeout=BACKEND_READ_TIMEOUT)
+        try:
+            conn.request(self.command, path, body=body, headers=headers)
+            resp = conn.getresponse()
+        except Exception as exc:
+            log("proxy error [%s]: %s %s: %s"
+                % (backend["label"], self.command, path, exc))
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self.send_simple(502, "Bad gateway: %s\n" % exc)
+            return
+        try:
+            self.send_response(resp.status)
+            for k, v in resp.getheaders():
+                lk = k.lower()
+                if lk in HOP_BY_HOP or lk == "content-length":
+                    continue
+                self.send_header(k, v)
+            # 流式：用 chunked 收尾，保持 HTTP/1.1 连接语义
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.wfile.flush()
+            if self.command == "HEAD":
+                return
+            pump = getattr(resp, "read1", None)
+            while True:
+                chunk = pump(8192) if pump is not None else resp.read(8192)
+                if not chunk:
+                    break
+                self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except Exception:
+            # 客户端断开或后端收尾都属正常
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def fetch(self, path, body, backend):
+        headers = self._upstream_headers(backend, path)
         conn = http.client.HTTPConnection(
             backend["host"], backend["port"], timeout=BACKEND_READ_TIMEOUT)
         try:

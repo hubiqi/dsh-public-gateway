@@ -319,7 +319,60 @@ systemctl --user restart dsh-web
 网关实际只有 `space-bunny`/`deepseek-v4.1-flash` 等）。用
 `curl .../v1/models` 核对真实 id 再改配置。
 
-## 验证
+### 11. 事件流（SSE）必须逐块透传，不能缓冲（网关已修）
+
+dsh 前端用 `GET /plugins/events` 订阅事件流：响应是
+`content-type: text/event-stream` + `Transfer-Encoding: chunked`，
+**永远不结束**。网关原先对它也走 `fetch()`，而 `fetch()` 里是
+
+```python
+resp = conn.getresponse()
+data = resp.read()      # ← 等整个响应读完
+```
+
+流式响应永远读不完 ⇒ 网关干等 120s ⇒ 超时回 502 ⇒ **前端永远停在「载入历史…」**，
+对话怎么都出不来。日志里能看到（超时日志带上了路径，一抓就准）：
+
+```
+proxy error [完整版]: GET /plugins/events: timed out
+```
+
+修法：识别客户端是否在要 SSE（`EventSource` 会带 `Accept: text/event-stream`），
+命中就换成逐块透传、用 chunked 收尾，连接保持：
+
+```python
+def _wants_stream(self):
+    return "text/event-stream" in (self.headers.get("Accept") or "").lower()
+```
+
+```python
+self.send_header("Transfer-Encoding", "chunked")
+self.end_headers()
+while True:
+    chunk = resp.read1(8192)
+    if not chunk: break
+    self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
+    self.wfile.flush()
+```
+
+验证：修复前 120s 后 502；修复后**首字节 3.7ms**、正确收到 28KB，
+且日志中此类超时**彻底消失**（修复前每几分钟一条）。
+另注意：`GET /plugins/events` 这类长连接会占住一个处理线程，这是预期行为。
+
+**结论**：任何“界面转圈、对话/历史出不来”的现象，先看网关日志里
+`proxy error ...: <路径>: timed out` —— 那条路径就是卡住的请求。
+
+### 12. 排查用：这条路径链最能定位问题
+
+```
+浏览器 → 网关(9080) → 后端(3080/3081) → 事件流(/plugins/events)
+```
+
+- 页面骨架出不来 → 看静态资源与模块 URL（第 4/5 条）
+- 骨架出来但内容空转 → 看事件流是否被缓冲（第 11 条）
+- 全都快但整体慢 → 看体积（第 7/9 条）
+
+
 
 - 公网访问登录页，完整版/原版切换正常，会话、模型、设置可用。
 - 用 Chrome ≤118 打开：无永久重连、无报错。
@@ -349,7 +402,7 @@ self-healing WebSocket proxy) plus every dsh-side compatibility fix that
 public access forced (pre-119 browser shims, gzip-safe host injection,
 legacy PDF build, settings boot fix) and post-update rebuild hooks.
 
-Ten traps are documented under "已知坑":
+Twelve traps are documented under "已知坑":
 
 1. Boot the backends from the built CLI (`apps/cli/lib/bin.js`), never from the
    tsx source entry `pnpm dsh` — the source entry loads some workspace packages
@@ -395,3 +448,15 @@ Ten traps are documented under "已知坑":
 10. A `400 Model is unavailable` in the UI usually means `settings.yaml` names a
    model id the provider gateway does not have; check `/v1/models` for the real
    ids.
+11. Server-Sent Events must be streamed, not buffered. The gateway read every
+   response to completion before forwarding it, so `GET /plugins/events` (an
+   endless `text/event-stream` the client subscribes to) blocked until the 120s
+   timeout and returned 502 — the conversation simply never loaded
+   ("Loading history…" forever). It now detects `Accept: text/event-stream` and
+   pumps chunks through with chunked framing; first byte went from a 120s stall
+   to 3.7ms. The timeout log now names the method and path, which is what made
+   this findable at all.
+12. The diagnostic chain: browser → gateway (9080) → backend (3080/3081) →
+   event stream (/plugins/events). No page skeleton means static assets or module
+   URLs; skeleton but empty content means the event stream; everything correct
+   yet slow means payload size.
