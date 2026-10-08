@@ -372,7 +372,49 @@ while True:
 - 骨架出来但内容空转 → 看事件流是否被缓冲（第 11 条）
 - 全都快但整体慢 → 看体积（第 7/9 条）
 
+### 13. 会话「载入历史…」卡死 = v3→v4 迁移拒绝未闭合的 tool call（已修）
 
+dsh 0.2.1 把会话日志从 v3 迁到 v4。`packages/session/session-format-v3-to-v4`
+在 `step/end` / `turn/end` 处要求本步内的 tool call 都已闭合：
+
+```ts
+closeTools(type) {
+  if (this.tools.size !== 0) throw new SessionFormatError(`${type} leaves unresolved tool call ...`)
+}
+```
+
+但**写入方在回合中途崩溃时，日志里必然留下没有 result 的 tool/call**（例如
+PTC 调度器抛错、进程被杀）。于是：
+
+- 客户端：对话区**永远停在「载入历史…」**，页面其它部分正常；
+- 服务端：`failed to observe session "<id>": Session migration from v3 to v4
+  refuses the transformed artifact: step/end leaves unresolved tool call ...`
+
+实测 33 个会话里 **10 个**因此打不开。
+
+**为什么这是迁移过度严格**：dsh 自己就有补救机制——读取端会追加
+`interruptedTurnClosers`（`session-query/src/cold-read.ts` 的文档注释原话：
+"append `interruptedTurnClosers` so a log whose writer crashed mid-turn folds as
+a balanced transcript"）。迁移抢在它之前抛错，把正常数据判成了损坏。
+
+**修法**：让 `closeTools()` 与同文件的 `turn/start` 分支保持一致（那里本来就是
+`this.tools.clear()` 不报错），只清空、不抛错：
+
+```sh
+python3 dsh-patches/fix-unclosed-tool-calls.py /path/to/deepseek-harness
+systemctl --user restart dsh-web
+```
+
+（脚本同时改 `lib/index.js`（运行时实际加载的产物）与 `src/`，保持一致。）
+
+**自查**：想知道哪些会话会中招，解压 `session.v3.jsonl.zstd` 后按顺序跟踪
+`tool/call` / `tool/result`，看有没有 `step/end` 时仍存在未闭合调用即可。
+
+**诊断这一步的关键**：在浏览器里 hook `WebSocket` 构造函数，记录
+`/api/remote.mux` 上收发的帧 —— 会话历史走的是 WS Remote，错误帧里直接写着
+`failed to observe session ...`，比从 UI 猜快得多。
+
+## 验证
 
 - 公网访问登录页，完整版/原版切换正常，会话、模型、设置可用。
 - 用 Chrome ≤118 打开：无永久重连、无报错。
@@ -402,7 +444,7 @@ self-healing WebSocket proxy) plus every dsh-side compatibility fix that
 public access forced (pre-119 browser shims, gzip-safe host injection,
 legacy PDF build, settings boot fix) and post-update rebuild hooks.
 
-Twelve traps are documented under "已知坑":
+Thirteen traps are documented under "已知坑":
 
 1. Boot the backends from the built CLI (`apps/cli/lib/bin.js`), never from the
    tsx source entry `pnpm dsh` — the source entry loads some workspace packages
@@ -457,6 +499,14 @@ Twelve traps are documented under "已知坑":
    to 3.7ms. The timeout log now names the method and path, which is what made
    this findable at all.
 12. The diagnostic chain: browser → gateway (9080) → backend (3080/3081) →
-   event stream (/plugins/events). No page skeleton means static assets or module
+   event stream (/plugins/events).
+13. Sessions that get stuck on "Loading history…" while the rest of the page works
+   are refused by the v3→v4 session migration: it requires every tool call to be
+   closed at `step/end`, yet a writer that crashes mid-turn always leaves an
+   unclosed `tool/call`. dsh already ships the remedy (`interruptedTurnClosers`,
+   appended by the reader), so the migration is rejecting valid data — 10 of 33
+   sessions were affected. `dsh-patches/fix-unclosed-tool-calls.py` relaxes
+   `closeTools()`. Diagnose it by hooking `WebSocket` in the browser and reading
+   the `/api/remote.mux` frames: the error frame names the cause outright. No page skeleton means static assets or module
    URLs; skeleton but empty content means the event stream; everything correct
    yet slow means payload size.
